@@ -1,0 +1,48 @@
+{
+  "name": "@kaushik-xs/authrs-client",
+  "version": "0.0.1",
+  "description": "Typed TypeScript client for the Authrs multi-tenant authentication service",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts --clean",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "authrs",
+    "auth",
+    "authentication",
+    "multi-tenant",
+    "typescript"
+  ],
+  "author": "Kaushik Sundar",
+  "license": "MIT",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kaushik-xs/authrs-client.git"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
