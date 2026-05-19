@@ -160,6 +160,14 @@ const { status } = await client.healthCheck();
 // { status: "ok" }
 ```
 
+#### `getMetrics()`
+
+Returns Prometheus-style metrics for the Authrs server. Does not require a tenant ID or auth token.
+
+```ts
+const metrics = await client.getMetrics();
+```
+
 #### `getSpec()`
 
 Returns the OpenAPI/Swagger spec for the Authrs server.
@@ -308,6 +316,17 @@ Invalidates all sessions for the current user across all devices. This call is t
 await client.logoutAll("session-token");
 ```
 
+#### `forceChangePassword(changeToken, newPassword, retypePassword)`
+
+Completes a forced password change. When a login response includes `passwordChangeRequired: true`, the server returns a `changeToken` instead of a full session token. Pass that token here to set a new password and receive a valid session.
+
+```ts
+const login = await client.loginEmailPassword("user@example.com", "temp-password");
+// login.passwordChangeRequired === true
+const session = await client.forceChangePassword(login.changeToken, "newPass!", "newPass!");
+// session.sessionToken is now a valid full session token
+```
+
 ---
 
 ### MFA (Multi-Factor Authentication)
@@ -375,12 +394,14 @@ Soft-deletes a user (sets `isArchived: true`).
 await client.archiveUser("admin-token", "user-id");
 ```
 
-#### `resetUserPassword(token, userId, newPassword, retypePassword)`
+#### `resetUserPassword(token, userId, newPassword, retypePassword, forcePasswordChange?)`
 
-Resets a user's password as an admin (no current password required).
+Resets a user's password as an admin (no current password required). Set `forcePasswordChange: true` to require the user to change their password on next login.
 
 ```ts
 await client.resetUserPassword("admin-token", "user-id", "newPass!", "newPass!");
+// Force user to change password on next login:
+await client.resetUserPassword("admin-token", "user-id", "tempPass!", "tempPass!", true);
 ```
 
 ---
@@ -532,6 +553,18 @@ const session = await client.loginEmailPassword(email, password);
 
 // Validate MFA to fully authenticate
 await client.validateMfa(session.sessionToken, totpCode);
+```
+
+### Forced password change flow
+
+```ts
+const login = await client.loginEmailPassword(email, temporaryPassword);
+
+if (login.passwordChangeRequired) {
+  // Redirect user to a change-password screen, then:
+  const session = await client.forceChangePassword(login.changeToken, newPassword, newPassword);
+  // session.sessionToken is now a valid full session
+}
 ```
 
 ---

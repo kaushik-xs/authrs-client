@@ -147,6 +147,7 @@ export class AuthrsClient {
 
   // Health
   healthCheck() { return this.request<{ status: string }>("GET", "/health", { tenantId: null }); }
+  getMetrics() { return this.request<unknown>("GET", "/metrics", { tenantId: null }); }
   getSpec() { return this.request<unknown>("GET", "/spec", { tenantId: null }); }
 
   // Auth (tenant-scoped, no auth token)
@@ -185,6 +186,10 @@ export class AuthrsClient {
   }
   logout(token: string) { return this.request<unknown>("POST", "/session/logout", { token, tenantId: null }); }
   logoutAll(token: string) { return this.request<unknown>("POST", "/session/logout/all", { token }); }
+  /** Complete a forced password change. Use the changeToken returned by login when passwordChangeRequired is true. */
+  forceChangePassword(changeToken: string, newPassword: string, retypePassword: string) {
+    return this.request<AuthrsSession>("POST", "/session/force-change-password", { body: { changeToken, newPassword, retypePassword } });
+  }
 
   // MFA (auth token + tenant-scoped)
   enableMfa(token: string) { return this.request<unknown>("POST", "/mfa/enable", { token }); }
@@ -212,8 +217,8 @@ export class AuthrsClient {
   removeRole(token: string, userId: string, roleId: string) {
     return this.request<unknown>("DELETE", `/admin/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(roleId)}`, { token });
   }
-  resetUserPassword(token: string, userId: string, newPassword: string, retypePassword: string) {
-    return this.request<unknown>("POST", `/admin/users/${encodeURIComponent(userId)}/reset-password`, { token, body: { newPassword, retypePassword } });
+  resetUserPassword(token: string, userId: string, newPassword: string, retypePassword: string, forcePasswordChange = false) {
+    return this.request<unknown>("POST", `/admin/users/${encodeURIComponent(userId)}/reset-password`, { token, body: { newPassword, retypePassword, forcePasswordChange } });
   }
 
   // Admin — Roles & Permissions
