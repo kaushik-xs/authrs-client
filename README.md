@@ -116,15 +116,50 @@ interface AuthrsSession {
 interface AuthrsRole {
   id: string;
   name: string;
+  uid?: string;
   tenantId?: string;
   createdAt?: string;
+}
+
+interface AuthrsPermissionStatement {
+  sid?: string;
+  effect: "Allow" | "Deny";
+  principals: string[];
+  actions: string[];
+  resources: string[];
+  conditions?: unknown[];
+}
+
+interface AuthrsPermissionDocument {
+  version: string;
+  statements: AuthrsPermissionStatement[];
 }
 
 interface AuthrsPermission {
   id: string;
   name: string;
   description?: string;
+  document?: AuthrsPermissionDocument;
   tenantId?: string;
+}
+
+interface AuthrsPermissionCheckResult {
+  resource: string;
+  action?: string;
+  allowed?: boolean;           // present when a single action is checked
+  decisions?: Record<string, boolean>; // present when all actions are checked
+}
+
+interface AuthrsCreatePermissionParams {
+  name: string;
+  description?: string;
+  document: AuthrsPermissionDocument;
+}
+
+interface AuthrsPackageSyncParams {
+  packageId: string;
+  tables: string[];
+  customActions?: string[];
 }
 
 interface AuthrsKvEntry {
@@ -252,6 +287,15 @@ window.location.href = url;
 ```
 
 > This is a synchronous method — it does not make a network request.
+
+#### `oauthCallback(provider, code, state?, token?)`
+
+Completes the OAuth flow by exchanging the authorization code returned by the provider. Call this from your OAuth callback route.
+
+```ts
+const session = await client.oauthCallback("google", req.query.code, req.query.state);
+// returns AuthrsSession
+```
 
 #### `forgotPassword(email)`
 
@@ -449,16 +493,60 @@ Removes a role from a user.
 await client.removeRole("admin-token", "user-id", "role-id");
 ```
 
+#### `listRolePermissions(token, roleId)`
+
+Lists all permissions attached to a role.
+
+```ts
+const { permissions } = await client.listRolePermissions("admin-token", "role-id");
+```
+
+#### `attachPermissionToRole(token, roleId, permissionId)`
+
+Attaches a permission to a role. The policy takes effect on the next request (cache evicted).
+
+```ts
+await client.attachPermissionToRole("admin-token", "role-id", "permission-id");
+```
+
+#### `detachPermissionFromRole(token, roleId, permissionId)`
+
+Removes a permission from a role.
+
+```ts
+await client.detachPermissionFromRole("admin-token", "role-id", "permission-id");
+```
+
 ---
 
 ### Admin — Permissions
 
-#### `createPermission(token, name, description)`
+Permissions are Cedar policy documents that control what actions users (via their roles) can perform on resources.
 
-Creates a new permission.
+#### `createPermission(token, params)`
+
+Creates a new Cedar permission policy. The `document` field is validated before saving.
+
+Principals accept: `role:<uid>`, `role:<name>`, `user:<uuid>`, `user:<email>`, `user:<username>`, or `*`.
 
 ```ts
-const permission = await client.createPermission("admin-token", "posts:write", "Can create and edit posts");
+const permission = await client.createPermission("admin-token", {
+  name: "allow-editor-read-materials",
+  description: "Allow editors to read materials",
+  document: {
+    version: "1.0",
+    statements: [
+      {
+        sid: "AllowEditorReadMaterials",
+        effect: "Allow",
+        principals: ["role:editor"],
+        actions: ["getMaterials"],
+        resources: ["service:core/package:manufacturing_core/table:materials"],
+        conditions: [],
+      },
+    ],
+  },
+});
 // returns AuthrsPermission
 ```
 
@@ -468,6 +556,66 @@ Lists all permissions in the tenant.
 
 ```ts
 const { permissions } = await client.listPermissions("admin-token");
+```
+
+#### `getPermission(token, permissionId)`
+
+Gets a single permission by ID.
+
+```ts
+const permission = await client.getPermission("admin-token", "permission-id");
+```
+
+#### `deletePermission(token, permissionId)`
+
+Deletes a permission and evicts the tenant's policy cache.
+
+```ts
+await client.deletePermission("admin-token", "permission-id");
+```
+
+#### `checkPermission(token, userId, resource, action?, context?)`
+
+Evaluates Cedar policy for a user against a resource.
+
+- Pass `action` to check a **single action** → returns `{ resource, action, allowed: boolean }`.
+- Omit `action` to check **all actions** for the resource scope → returns `{ resource, decisions: { actionName: boolean, ... } }`.
+
+Resource scopes: `service:core/package:pkg/table:tbl` (table), `service:core/package:pkg` (package), `service:core` (service).
+
+```ts
+// Single action
+const result = await client.checkPermission(
+  "admin-token",
+  "user-id",
+  "service:core/package:manufacturing_core/table:materials",
+  "getMaterials",
+);
+// { resource: "...", action: "getMaterials", allowed: true }
+
+// All actions for a table
+const result = await client.checkPermission(
+  "admin-token",
+  "user-id",
+  "service:core/package:manufacturing_core/table:materials",
+);
+// { resource: "...", decisions: { getMaterials: true, postMaterials: false, ... } }
+```
+
+---
+
+### Admin — Packages
+
+#### `syncPackage(token, params)`
+
+Registers or updates a package's tables and custom actions. Rebuilds the Cedar schema and evicts all policy caches. Standard CRUD actions (`getMaterials`, `postMaterials`, etc.) are auto-generated from table names. Called automatically by `architect-sdk` after a package install.
+
+```ts
+await client.syncPackage("admin-token", {
+  packageId: "manufacturing_core",
+  tables: ["materials", "bom_headers", "bom_lines"],
+  customActions: ["approveBom", "rejectBom"],
+});
 ```
 
 ---
