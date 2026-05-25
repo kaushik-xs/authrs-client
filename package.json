@@ -1,6 +1,6 @@
 {
   "name": "@kaushik91/authrs-client",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Typed TypeScript client for the Authrs multi-tenant authentication service",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
