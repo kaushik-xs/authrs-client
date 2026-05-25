@@ -39,15 +39,50 @@ export interface AuthrsSession {
 export interface AuthrsRole {
   id: string;
   name: string;
+  uid?: string;
   tenantId?: string;
   createdAt?: string;
+}
+
+export interface AuthrsPermissionStatement {
+  sid?: string;
+  effect: "Allow" | "Deny";
+  principals: string[];
+  actions: string[];
+  resources: string[];
+  conditions?: unknown[];
+}
+
+export interface AuthrsPermissionDocument {
+  version: string;
+  statements: AuthrsPermissionStatement[];
 }
 
 export interface AuthrsPermission {
   id: string;
   name: string;
   description?: string;
+  document?: AuthrsPermissionDocument;
   tenantId?: string;
+}
+
+export interface AuthrsPermissionCheckResult {
+  resource: string;
+  action?: string;
+  allowed?: boolean;
+  decisions?: Record<string, boolean>;
+}
+
+export interface AuthrsCreatePermissionParams {
+  name: string;
+  description?: string;
+  document: AuthrsPermissionDocument;
+}
+
+export interface AuthrsPackageSyncParams {
+  packageId: string;
+  tables: string[];
+  customActions?: string[];
 }
 
 export interface AuthrsKvEntry {
@@ -173,6 +208,11 @@ export class AuthrsClient {
     return this.request<AuthrsSession>("POST", "/login/otp/verify", { body: { identifier, code, channel } });
   }
   oauthAuthorizeUrl(provider: string): string { return `${this.baseUrl}/oauth/${encodeURIComponent(provider)}`; }
+  oauthCallback(provider: string, code: string, state?: string, token?: string) {
+    return this.request<AuthrsSession>("GET", `/oauth/${encodeURIComponent(provider)}/callback`, {
+      token, query: { code, ...(state !== undefined ? { state } : {}) },
+    });
+  }
   forgotPassword(email: string) { return this.request<unknown>("POST", "/forgot-password", { body: { email } }); }
   resetPassword(token: string, newPassword: string, retypePassword: string) {
     return this.request<unknown>("POST", "/reset-password", { body: { token, newPassword, retypePassword } });
@@ -224,10 +264,35 @@ export class AuthrsClient {
   // Admin — Roles & Permissions
   createRole(token: string, name: string) { return this.request<AuthrsRole>("POST", "/admin/roles", { token, body: { name } }); }
   listRoles(token: string) { return this.request<{ roles: AuthrsRole[] }>("GET", "/admin/roles", { token }); }
-  createPermission(token: string, name: string, description: string) {
-    return this.request<AuthrsPermission>("POST", "/admin/permissions", { token, body: { name, description } });
+  listRolePermissions(token: string, roleId: string) {
+    return this.request<{ permissions: AuthrsPermission[] }>("GET", `/admin/roles/${encodeURIComponent(roleId)}/permissions`, { token });
+  }
+  attachPermissionToRole(token: string, roleId: string, permissionId: string) {
+    return this.request<unknown>("POST", `/admin/roles/${encodeURIComponent(roleId)}/permissions`, { token, body: { permissionId } });
+  }
+  detachPermissionFromRole(token: string, roleId: string, permissionId: string) {
+    return this.request<unknown>("DELETE", `/admin/roles/${encodeURIComponent(roleId)}/permissions/${encodeURIComponent(permissionId)}`, { token });
+  }
+  createPermission(token: string, params: AuthrsCreatePermissionParams) {
+    return this.request<AuthrsPermission>("POST", "/admin/permissions", { token, body: params });
   }
   listPermissions(token: string) { return this.request<{ permissions: AuthrsPermission[] }>("GET", "/admin/permissions", { token }); }
+  getPermission(token: string, permissionId: string) {
+    return this.request<AuthrsPermission>("GET", `/admin/permissions/${encodeURIComponent(permissionId)}`, { token });
+  }
+  deletePermission(token: string, permissionId: string) {
+    return this.request<unknown>("DELETE", `/admin/permissions/${encodeURIComponent(permissionId)}`, { token });
+  }
+  checkPermission(token: string, userId: string, resource: string, action?: string, context: Record<string, unknown> = {}) {
+    return this.request<AuthrsPermissionCheckResult>("POST", "/admin/permissions/check", {
+      token, body: { userId, resource, ...(action !== undefined ? { action } : {}), context },
+    });
+  }
+
+  // Admin — Packages
+  syncPackage(token: string, params: AuthrsPackageSyncParams) {
+    return this.request<unknown>("POST", "/admin/packages/sync", { token, body: params });
+  }
 
   // Admin — KV Store
   listKvKeys(token: string) { return this.request<AuthrsKvEntry[]>("GET", "/admin/kv_store", { token }); }
