@@ -104,6 +104,7 @@ interface AuthrsUser {
   lastName?: string;
   status?: string;
   isArchived?: boolean;
+  accessValidUntil?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -446,6 +447,18 @@ Resets a user's password as an admin (no current password required). Set `forceP
 await client.resetUserPassword("admin-token", "user-id", "newPass!", "newPass!");
 // Force user to change password on next login:
 await client.resetUserPassword("admin-token", "user-id", "tempPass!", "tempPass!", true);
+```
+
+#### `setAccessValidity(token, userId, accessValidUntil)`
+
+Sets or clears the access expiry for a user. Once the datetime passes the user cannot log in and receives a `403 access_expired` error. Pass `null` to remove the expiry (access becomes indefinite).
+
+```ts
+// Restrict access until end of year
+await client.setAccessValidity("admin-token", "user-id", "2026-12-31T23:59:59Z");
+
+// Remove expiry — access is indefinite
+await client.setAccessValidity("admin-token", "user-id", null);
 ```
 
 ---
