@@ -27,6 +27,7 @@ export interface AuthrsUser {
   lastName?: string;
   status?: string;
   isArchived?: boolean;
+  accessValidUntil?: string | null;
   createdAt?: string;
   updatedAt?: string;
 }
@@ -259,6 +260,10 @@ export class AuthrsClient {
   }
   resetUserPassword(token: string, userId: string, newPassword: string, retypePassword: string, forcePasswordChange = false) {
     return this.request<unknown>("POST", `/admin/users/${encodeURIComponent(userId)}/reset-password`, { token, body: { newPassword, retypePassword, forcePasswordChange } });
+  }
+  /** Set or clear the access expiry for a user. Pass null to remove the expiry (access becomes indefinite). */
+  setAccessValidity(token: string, userId: string, accessValidUntil: string | null) {
+    return this.request<unknown>("PATCH", `/admin/users/${encodeURIComponent(userId)}/access-validity`, { token, body: { accessValidUntil } });
   }
 
   // Admin — Roles & Permissions
