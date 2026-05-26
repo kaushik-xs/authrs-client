@@ -179,6 +179,19 @@ interface AuthrsCreateUserParams {
   password?: string;
   retypePassword?: string;
 }
+
+interface AuthrsGroup {
+  id: string;
+  name: string;
+  uid: string;
+  description?: string | null;
+  tenantId?: string;
+}
+
+interface AuthrsCreateGroupParams {
+  name: string;
+  description?: string;
+}
 ```
 
 ---
@@ -528,6 +541,106 @@ Removes a permission from a role.
 
 ```ts
 await client.detachPermissionFromRole("admin-token", "role-id", "permission-id");
+```
+
+---
+
+### Admin — Groups
+
+Groups combine users for shared role assignments, Cedar policy targeting, and bulk operations. Roles assigned to a group are inherited by all members — their session payload includes the full effective set.
+
+#### `createGroup(token, params)`
+
+Creates a new group. The `uid` (slug) is derived automatically from the name.
+
+```ts
+const group = await client.createGroup("admin-token", {
+  name: "Engineering",
+  description: "All engineering team members",
+});
+// returns AuthrsGroup: { id, name, uid: "engineering", description }
+```
+
+#### `listGroups(token)`
+
+Lists all groups in the tenant.
+
+```ts
+const { groups } = await client.listGroups("admin-token");
+```
+
+#### `getGroup(token, groupId)`
+
+Gets a single group by ID.
+
+```ts
+const group = await client.getGroup("admin-token", "group-id");
+```
+
+#### `deleteGroup(token, groupId)`
+
+Deletes a group. Members are unlinked and inherited roles are removed from their sessions on next login.
+
+```ts
+await client.deleteGroup("admin-token", "group-id");
+```
+
+#### `addUserToGroup(token, groupId, userId)`
+
+Adds a user to a group. Both must exist in the tenant. Idempotent — adding an existing member is a no-op.
+
+```ts
+await client.addUserToGroup("admin-token", "group-id", "user-id");
+```
+
+#### `listGroupMembers(token, groupId)`
+
+Lists all user IDs that are members of a group.
+
+```ts
+const { users } = await client.listGroupMembers("admin-token", "group-id");
+// users: ["uuid1", "uuid2", ...]
+```
+
+#### `removeUserFromGroup(token, groupId, userId)`
+
+Removes a user from a group.
+
+```ts
+await client.removeUserFromGroup("admin-token", "group-id", "user-id");
+```
+
+#### `listUserGroups(token, userId)`
+
+Lists all groups a user belongs to.
+
+```ts
+const { groups } = await client.listUserGroups("admin-token", "user-id");
+// groups: [{ id, name, uid }, ...]
+```
+
+#### `assignRoleToGroup(token, groupId, roleId)`
+
+Assigns a role to a group. All current and future members inherit this role. Idempotent.
+
+```ts
+await client.assignRoleToGroup("admin-token", "group-id", "role-id");
+```
+
+#### `listGroupRoles(token, groupId)`
+
+Lists roles assigned to a group.
+
+```ts
+const { roles } = await client.listGroupRoles("admin-token", "group-id");
+```
+
+#### `removeRoleFromGroup(token, groupId, roleId)`
+
+Removes a role assignment from a group.
+
+```ts
+await client.removeRoleFromGroup("admin-token", "group-id", "role-id");
 ```
 
 ---

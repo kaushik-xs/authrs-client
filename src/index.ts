@@ -103,6 +103,19 @@ export interface AuthrsCreateUserParams {
   retypePassword?: string;
 }
 
+export interface AuthrsGroup {
+  id: string;
+  name: string;
+  uid: string;
+  description?: string | null;
+  tenantId?: string;
+}
+
+export interface AuthrsCreateGroupParams {
+  name: string;
+  description?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -292,6 +305,41 @@ export class AuthrsClient {
     return this.request<AuthrsPermissionCheckResult>("POST", "/admin/permissions/check", {
       token, body: { userId, resource, ...(action !== undefined ? { action } : {}), context },
     });
+  }
+
+  // Admin — Groups
+  createGroup(token: string, params: AuthrsCreateGroupParams) {
+    return this.request<AuthrsGroup>("POST", "/admin/groups", { token, body: params });
+  }
+  listGroups(token: string) {
+    return this.request<{ groups: AuthrsGroup[] }>("GET", "/admin/groups", { token });
+  }
+  getGroup(token: string, groupId: string) {
+    return this.request<AuthrsGroup>("GET", `/admin/groups/${encodeURIComponent(groupId)}`, { token });
+  }
+  deleteGroup(token: string, groupId: string) {
+    return this.request<unknown>("DELETE", `/admin/groups/${encodeURIComponent(groupId)}`, { token });
+  }
+  addUserToGroup(token: string, groupId: string, userId: string) {
+    return this.request<unknown>("POST", `/admin/groups/${encodeURIComponent(groupId)}/users`, { token, body: { userId } });
+  }
+  listGroupMembers(token: string, groupId: string) {
+    return this.request<{ users: string[] }>("GET", `/admin/groups/${encodeURIComponent(groupId)}/users`, { token });
+  }
+  removeUserFromGroup(token: string, groupId: string, userId: string) {
+    return this.request<unknown>("DELETE", `/admin/groups/${encodeURIComponent(groupId)}/users/${encodeURIComponent(userId)}`, { token });
+  }
+  listUserGroups(token: string, userId: string) {
+    return this.request<{ groups: AuthrsGroup[] }>("GET", `/admin/users/${encodeURIComponent(userId)}/groups`, { token });
+  }
+  assignRoleToGroup(token: string, groupId: string, roleId: string) {
+    return this.request<unknown>("POST", `/admin/groups/${encodeURIComponent(groupId)}/roles`, { token, body: { roleId } });
+  }
+  listGroupRoles(token: string, groupId: string) {
+    return this.request<{ roles: AuthrsRole[] }>("GET", `/admin/groups/${encodeURIComponent(groupId)}/roles`, { token });
+  }
+  removeRoleFromGroup(token: string, groupId: string, roleId: string) {
+    return this.request<unknown>("DELETE", `/admin/groups/${encodeURIComponent(groupId)}/roles/${encodeURIComponent(roleId)}`, { token });
   }
 
   // Admin — Packages
