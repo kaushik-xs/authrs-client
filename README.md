@@ -329,6 +329,39 @@ await client.resetPassword("reset-token-from-email", "newPass!", "newPass!");
 
 ---
 
+### Availability Checks
+
+These methods check whether a given identifier is already registered in the tenant. They require a valid session token and are tenant-scoped. Useful for inline validation during profile editing or admin user creation flows.
+
+#### `checkEmailAvailability(token, email)`
+
+Returns `{ available: true }` if the email is not yet registered in the tenant.
+
+```ts
+const { available } = await client.checkEmailAvailability("session-token", "jane@example.com");
+if (!available) {
+  console.error("Email is already taken");
+}
+```
+
+#### `checkUsernameAvailability(token, username)`
+
+Returns `{ available: true }` if the username is not yet registered in the tenant.
+
+```ts
+const { available } = await client.checkUsernameAvailability("session-token", "jdoe");
+```
+
+#### `checkMobileAvailability(token, mobile, countryCode)`
+
+Returns `{ available: true }` if the mobile number (with country code) is not yet registered in the tenant.
+
+```ts
+const { available } = await client.checkMobileAvailability("session-token", "9876543210", "+91");
+```
+
+---
+
 ### Session
 
 Session methods use a bearer token. Most do not send a `X-Tenant-ID` header (the session is global).

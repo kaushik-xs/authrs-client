@@ -232,6 +232,17 @@ export class AuthrsClient {
     return this.request<unknown>("POST", "/reset-password", { body: { token, newPassword, retypePassword } });
   }
 
+  // Availability checks (auth token + tenant-scoped)
+  checkEmailAvailability(token: string, email: string) {
+    return this.request<{ available: boolean }>("POST", "/check-availability/email", { token, body: { email } });
+  }
+  checkUsernameAvailability(token: string, username: string) {
+    return this.request<{ available: boolean }>("POST", "/check-availability/username", { token, body: { username } });
+  }
+  checkMobileAvailability(token: string, mobile: string, countryCode: string) {
+    return this.request<{ available: boolean }>("POST", "/check-availability/mobile", { token, body: { mobile, countryCode } });
+  }
+
   // Session (no X-Tenant-ID except logoutAll)
   validateSession(token: string) { return this.request<{ valid: boolean }>("GET", "/session/validate", { token, tenantId: null }); }
   me(token: string) { return this.request<AuthrsUser>("GET", "/session/me", { token, tenantId: null }); }
