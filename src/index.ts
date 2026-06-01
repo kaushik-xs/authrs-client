@@ -41,8 +41,17 @@ export interface AuthrsRole {
   id: string;
   name: string;
   uid?: string;
+  /** Parent role id when this role inherits from another role. Null/absent for root roles. */
+  parentRoleId?: string | null;
   tenantId?: string;
   createdAt?: string;
+}
+
+/** A single ancestor in a role's hierarchy chain. */
+export interface AuthrsRoleAncestor {
+  id: string;
+  name: string;
+  uid: string;
 }
 
 export interface AuthrsPermissionStatement {
@@ -291,8 +300,19 @@ export class AuthrsClient {
   }
 
   // Admin — Roles & Permissions
-  createRole(token: string, name: string) { return this.request<AuthrsRole>("POST", "/admin/roles", { token, body: { name } }); }
+  /** Create a role. Pass parentRoleId to make it inherit permissions from a parent role. */
+  createRole(token: string, name: string, parentRoleId?: string | null) {
+    return this.request<AuthrsRole>("POST", "/admin/roles", { token, body: { name, ...(parentRoleId != null ? { parentRoleId } : {}) } });
+  }
   listRoles(token: string) { return this.request<{ roles: AuthrsRole[] }>("GET", "/admin/roles", { token }); }
+  /** Set or clear a role's parent. Pass null to make the role a root (no parent). */
+  setRoleParent(token: string, roleId: string, parentRoleId: string | null) {
+    return this.request<unknown>("PUT", `/admin/roles/${encodeURIComponent(roleId)}/parent`, { token, body: { parentRoleId } });
+  }
+  /** Get the ancestor chain (root-first) for a role. */
+  getRoleHierarchy(token: string, roleId: string) {
+    return this.request<{ ancestors: AuthrsRoleAncestor[] }>("GET", `/admin/roles/${encodeURIComponent(roleId)}/hierarchy`, { token });
+  }
   listRolePermissions(token: string, roleId: string) {
     return this.request<{ permissions: AuthrsPermission[] }>("GET", `/admin/roles/${encodeURIComponent(roleId)}/permissions`, { token });
   }

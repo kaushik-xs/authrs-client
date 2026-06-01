@@ -511,21 +511,44 @@ await client.setAccessValidity("admin-token", "user-id", null);
 
 ### Admin — Roles
 
-#### `createRole(token, name)`
+#### `createRole(token, name, parentRoleId?)`
 
-Creates a new role.
+Creates a new role. Pass an optional `parentRoleId` to make the role inherit all
+permissions from a parent role (role hierarchy).
 
 ```ts
 const role = await client.createRole("admin-token", "editor");
 // returns AuthrsRole
+
+// Create a sub-role that inherits from an existing role
+const subRole = await client.createRole("admin-token", "junior-editor", role.id);
 ```
 
 #### `listRoles(token)`
 
-Lists all roles in the tenant.
+Lists all roles in the tenant. Each role includes `parentRoleId` (null for root roles).
 
 ```ts
 const { roles } = await client.listRoles("admin-token");
+```
+
+#### `setRoleParent(token, roleId, parentRoleId)`
+
+Sets or clears a role's parent. Pass `null` to make the role a root role. A role
+inherits every permission attached to its ancestors. Cycles are rejected by the server.
+
+```ts
+await client.setRoleParent("admin-token", "role-id", "parent-role-id");
+await client.setRoleParent("admin-token", "role-id", null); // detach
+```
+
+#### `getRoleHierarchy(token, roleId)`
+
+Returns the ancestor chain for a role, root-first.
+
+```ts
+const { ancestors } = await client.getRoleHierarchy("admin-token", "role-id");
+// ancestors: [{ id, name, uid }, ...]
 ```
 
 #### `listUserRoles(token, userId)`
