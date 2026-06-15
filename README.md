@@ -94,15 +94,17 @@ interface AuthrsConfig {
   tenantId?: string;
 }
 
-interface AuthrsUser {
-  id: string;
-  email?: string;
-  username?: string;
-  mobile?: string;
-  countryCode?: string;
-  firstName?: string;
-  lastName?: string;
-  status?: string;
+interface AuthrsUser {           // a per-tenant membership of a global identity
+  id: string;                    // membership id
+  identityId?: string;           // the shared identity (same human across tenants)
+  email?: string;                // \
+  mobile?: string;               //  } sourced from the identity
+  countryCode?: string;          //  }
+  firstName?: string;            //  }
+  lastName?: string;             // /
+  mfaEnabled?: boolean;          // from the identity
+  username?: string;             // per-tenant
+  status?: string;               // per-tenant
   isArchived?: boolean;
   accessValidUntil?: string | null;
   createdAt?: string;

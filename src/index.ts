@@ -17,8 +17,15 @@ export interface AuthrsConfig {
   tenantId?: string;
 }
 
+/**
+ * A per-tenant membership of a global identity. `id` is the membership id; `identityId` is
+ * the shared identity. Profile fields (name, email, mobile) and `mfaEnabled` are sourced
+ * from that identity; `username`, `status`, and `accessValidUntil` are per-tenant.
+ */
 export interface AuthrsUser {
   id: string;
+  /** The global identity behind this membership (same human across tenants). */
+  identityId?: string;
   email?: string;
   username?: string;
   mobile?: string;
@@ -26,6 +33,7 @@ export interface AuthrsUser {
   firstName?: string;
   lastName?: string;
   status?: string;
+  mfaEnabled?: boolean;
   isArchived?: boolean;
   accessValidUntil?: string | null;
   createdAt?: string;
