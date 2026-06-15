@@ -111,7 +111,48 @@ interface AuthrsUser {
 
 interface AuthrsSession {
   sessionToken: string;
+  expiresAt?: string;  // RFC 3339, present on successful logins / tenant selection
   user?: AuthrsUser;
+}
+
+// --- Single sign-on (shared identity across tenants) ---
+
+interface AuthrsTenantMembership {
+  tenantId: string;
+  status: string;
+}
+
+interface AuthrsIdentityLogin {
+  identityToken: string;                  // short-lived; exchange via selectTenant
+  tenants: AuthrsTenantMembership[];      // tenants this identity belongs to
+}
+
+interface AuthrsSessionInfo {             // GET /session/validate
+  tenantId: string;
+  userId: string;
+  identityId: string;                     // global identity (same human across tenants)
+  roles: string[];
+  permissions: string[];
+  expiresAt: string;
+}
+
+interface AuthrsMe {                      // GET /session/me
+  userId: string;
+  identityId: string;
+  roles: string[];
+  permissions: string[];
+  expiresAt: string;
+  user: AuthrsUser;
+}
+
+interface AuthrsVerificationPending {     // returned by signup on an existing-identity collision
+  message: string;
+}
+
+interface AuthrsMembership {              // returned by verifyMembership
+  id: string;
+  tenantId: string;
+  status: string;
 }
 
 interface AuthrsRole {
@@ -229,15 +270,34 @@ const spec = await client.getSpec();
 
 ### Authentication
 
-All auth methods are tenant-scoped (the configured `tenantId` is sent automatically).
+These auth methods are tenant-scoped (the configured `tenantId` is sent automatically). For
+**single sign-on across tenants** (one identity, many tenants), see [Single Sign-On](#single-sign-on-sso) below.
 
 #### `signup(firstName, lastName, email, password, retypePassword)`
 
-Register a new user in the tenant.
+Register a new user in the tenant. The email/mobile is a **global identity handle**: if it
+already belongs to an existing identity (e.g. the user is registered in another tenant), no
+account is created — a verify-to-join email is sent to the owner and an
+`AuthrsVerificationPending` is returned instead. Disambiguate with `"id" in result`.
 
 ```ts
-const user = await client.signup("Jane", "Doe", "jane@example.com", "s3cr3t!", "s3cr3t!");
-// returns AuthrsUser
+const result = await client.signup("Jane", "Doe", "jane@example.com", "s3cr3t!", "s3cr3t!");
+if ("id" in result) {
+  // AuthrsUser — created
+} else {
+  console.log(result.message); // AuthrsVerificationPending — check your email to join
+}
+```
+
+#### `verifyMembership(token)`
+
+Accept a verify-to-join invite using the token from the signup email. Adds the existing
+identity as a member of the inviting tenant. The tenant is encoded in the token — no
+`X-Tenant-ID` needed.
+
+```ts
+const membership = await client.verifyMembership("token-from-email");
+// { id, tenantId, status }
 ```
 
 #### `loginEmailPassword(email, password)`
@@ -313,7 +373,8 @@ const session = await client.oauthCallback("google", req.query.code, req.query.s
 
 #### `forgotPassword(email)`
 
-Sends a password reset email.
+Sends a password reset email. Operates on the **global identity** — the reset (and the new
+password) applies across every tenant the identity belongs to, not just the current one.
 
 ```ts
 await client.forgotPassword("jane@example.com");
@@ -321,7 +382,7 @@ await client.forgotPassword("jane@example.com");
 
 #### `resetPassword(token, newPassword, retypePassword)`
 
-Resets the password using the token from the reset email.
+Resets the (global) password using the token from the reset email.
 
 ```ts
 await client.resetPassword("reset-token-from-email", "newPass!", "newPass!");
@@ -329,9 +390,61 @@ await client.resetPassword("reset-token-from-email", "newPass!", "newPass!");
 
 ---
 
+### Single Sign-On (SSO)
+
+The same person can belong to many tenants under **one identity and one credential**. These
+endpoints are **not** tenant-scoped — they don't send `X-Tenant-ID`. Log in once by email,
+then pick a tenant (or switch between tenants) without re-entering the password.
+
+```ts
+// 1) Authenticate the identity (no tenant). Returns a short-lived identity token + tenants.
+const { identityToken, tenants } = await client.loginIdentity("jane@example.com", "s3cr3t!");
+// tenants: [{ tenantId: "acme", status: "active" }, { tenantId: "globex", status: "active" }]
+
+// 2) Exchange the identity token for a session in the chosen tenant.
+const session = await client.selectTenant(identityToken, "acme");
+localStorage.setItem("token", session.sessionToken);
+
+// later — hop to another tenant from an active session, no re-auth:
+const other = await client.switchTenant(session.sessionToken, "globex");
+```
+
+#### `loginIdentity(email, password)`
+
+Tenant-less login by email. Returns an `AuthrsIdentityLogin` (`{ identityToken, tenants }`).
+
+#### `identityTenants(identityToken)`
+
+Lists the tenants for an identity token (the SSO tenant picker). Bearer = identity token.
+
+```ts
+const { tenants } = await client.identityTenants(identityToken);
+```
+
+#### `selectTenant(identityToken, tenantId)`
+
+Exchanges an identity token for a tenant-scoped session. Returns an `AuthrsSession`.
+
+#### `switchTenant(sessionToken, tenantId)`
+
+Mints a session for another tenant the same identity belongs to, from an active session — no
+re-authentication.
+
+#### `logoutGlobal(token)`
+
+Revokes **every** session of this identity across all of its tenants (the "log out everywhere" button).
+
+```ts
+await client.logoutGlobal(session.sessionToken);
+```
+
+---
+
 ### Availability Checks
 
-These methods check whether a given identifier is already registered in the tenant. They require a valid session token and are tenant-scoped. Useful for inline validation during profile editing or admin user creation flows.
+These methods check whether a given identifier is already registered. They require a valid
+session token. **Email and mobile are checked globally** (an identity handle is unique across
+all tenants); **username is per-tenant**.
 
 #### `checkEmailAvailability(token, email)`
 
@@ -368,19 +481,22 @@ Session methods use a bearer token. Most do not send a `X-Tenant-ID` header (the
 
 #### `validateSession(token)`
 
-Checks whether a session token is still valid.
+Validates a session token and returns its `AuthrsSessionInfo` (`tenantId`, `userId`,
+`identityId`, `roles`, `permissions`, `expiresAt`). Throws `AuthrsError` (401) if the token
+is invalid or expired.
 
 ```ts
-const { valid } = await client.validateSession("session-token");
+const info = await client.validateSession("session-token");
+// { tenantId, userId, identityId, roles, permissions, expiresAt }
 ```
 
 #### `me(token)`
 
-Returns the currently authenticated user's profile.
+Returns the current session info plus the user profile (`AuthrsMe`). Includes `identityId`.
 
 ```ts
-const user = await client.me("session-token");
-// returns AuthrsUser
+const me = await client.me("session-token");
+// { userId, identityId, roles, permissions, expiresAt, user: { ... } }
 ```
 
 #### `changePassword(token, currentPassword, newPassword, retypePassword)`
@@ -851,6 +967,22 @@ const session = await client.loginEmailPassword(email, password);
 localStorage.setItem("token", session.sessionToken);
 ```
 
+### Single sign-on across tenants
+
+```ts
+// Log in once; let the user choose which tenant to enter.
+const { identityToken, tenants } = await client.loginIdentity(email, password);
+
+if (tenants.length === 1) {
+  const session = await client.selectTenant(identityToken, tenants[0].tenantId);
+  localStorage.setItem("token", session.sessionToken);
+} else {
+  // render a tenant picker from `tenants`, then:
+  const session = await client.selectTenant(identityToken, chosenTenantId);
+  localStorage.setItem("token", session.sessionToken);
+}
+```
+
 ### Middleware / route guard (Next.js)
 
 ```ts
@@ -860,8 +992,11 @@ export async function middleware(request: Request) {
   const token = request.headers.get("Authorization")?.replace("Bearer ", "");
   if (!token) return new Response("Unauthorized", { status: 401 });
 
-  const { valid } = await getAuthrsClient().validateSession(token);
-  if (!valid) return new Response("Unauthorized", { status: 401 });
+  try {
+    await getAuthrsClient().validateSession(token); // throws AuthrsError if invalid/expired
+  } catch {
+    return new Response("Unauthorized", { status: 401 });
+  }
 }
 ```
 

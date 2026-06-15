@@ -34,7 +34,60 @@ export interface AuthrsUser {
 
 export interface AuthrsSession {
   sessionToken: string;
+  /** Session expiry (RFC 3339). Present on successful logins and tenant selection. */
+  expiresAt?: string;
   user?: AuthrsUser;
+}
+
+/** A tenant an identity belongs to, returned by the tenant-less identity login. */
+export interface AuthrsTenantMembership {
+  tenantId: string;
+  status: string;
+}
+
+/**
+ * Result of a tenant-less SSO login: a short-lived identity token plus the tenants this
+ * identity belongs to. Exchange the token via `selectTenant` for a tenant-scoped session.
+ */
+export interface AuthrsIdentityLogin {
+  identityToken: string;
+  tenants: AuthrsTenantMembership[];
+}
+
+/** Session metadata returned by `GET /session/validate`. */
+export interface AuthrsSessionInfo {
+  tenantId: string;
+  userId: string;
+  /** The global identity behind this membership (same human across tenants). */
+  identityId: string;
+  roles: string[];
+  permissions: string[];
+  expiresAt: string;
+}
+
+/** Current-session info returned by `GET /session/me`. */
+export interface AuthrsMe {
+  userId: string;
+  identityId: string;
+  roles: string[];
+  permissions: string[];
+  expiresAt: string;
+  user: AuthrsUser;
+}
+
+/**
+ * Returned by `signup` when the email/mobile already maps to an existing global identity:
+ * a verify-to-join email is sent to the owner and no account is created synchronously.
+ */
+export interface AuthrsVerificationPending {
+  message: string;
+}
+
+/** Membership created by accepting a verify-to-join invite (`POST /signup/verify`). */
+export interface AuthrsMembership {
+  id: string;
+  tenantId: string;
+  status: string;
 }
 
 export interface AuthrsRole {
@@ -209,8 +262,18 @@ export class AuthrsClient {
   getSpec() { return this.request<unknown>("GET", "/spec", { tenantId: null }); }
 
   // Auth (tenant-scoped, no auth token)
+  /**
+   * Sign up within the current tenant. If the email/mobile already belongs to a global
+   * identity (e.g. the user exists in another tenant), no account is created — a
+   * verify-to-join email is sent to the owner and an `AuthrsVerificationPending`
+   * `{ message }` is returned instead of the user. Disambiguate with `"id" in result`.
+   */
   signup(firstName: string, lastName: string, email: string, password: string, retypePassword: string) {
-    return this.request<AuthrsUser>("POST", "/signup", { body: { firstName, lastName, email, password, retypePassword } });
+    return this.request<AuthrsUser | AuthrsVerificationPending>("POST", "/signup", { body: { firstName, lastName, email, password, retypePassword } });
+  }
+  /** Accept a verify-to-join invite (token from the signup email). The tenant is encoded in the token — no X-Tenant-ID needed. */
+  verifyMembership(token: string) {
+    return this.request<AuthrsMembership>("POST", "/signup/verify", { tenantId: null, body: { token } });
   }
   loginEmailPassword(email: string, password: string) {
     return this.request<AuthrsSession>("POST", "/login/email-password", { body: { email, password } });
@@ -230,18 +293,38 @@ export class AuthrsClient {
   loginOtpVerify(identifier: string, code: string, channel: "email" | "sms" | "whatsapp") {
     return this.request<AuthrsSession>("POST", "/login/otp/verify", { body: { identifier, code, channel } });
   }
+
+  // SSO — tenant-less identity login + tenant selection (no X-Tenant-ID)
+  /**
+   * Log in by email across all tenants (single sign-on). Returns a short-lived identity
+   * token plus every tenant this identity belongs to. Exchange it via `selectTenant`.
+   */
+  loginIdentity(email: string, password: string) {
+    return this.request<AuthrsIdentityLogin>("POST", "/login/identity", { tenantId: null, body: { email, password } });
+  }
+  /** List the tenants for an identity token (the SSO tenant picker). Bearer = identity token. */
+  identityTenants(identityToken: string) {
+    return this.request<{ tenants: AuthrsTenantMembership[] }>("GET", "/identity/tenants", { token: identityToken, tenantId: null });
+  }
+  /** Exchange an identity token for a tenant-scoped session. Bearer = identity token. */
+  selectTenant(identityToken: string, tenantId: string) {
+    return this.request<AuthrsSession>("POST", "/login/select-tenant", { token: identityToken, tenantId: null, body: { tenantId } });
+  }
   oauthAuthorizeUrl(provider: string): string { return `${this.baseUrl}/oauth/${encodeURIComponent(provider)}`; }
   oauthCallback(provider: string, code: string, state?: string, token?: string) {
     return this.request<AuthrsSession>("GET", `/oauth/${encodeURIComponent(provider)}/callback`, {
       token, query: { code, ...(state !== undefined ? { state } : {}) },
     });
   }
+  /** Start a password reset. Operates on the GLOBAL identity — the reset (and the resulting
+   *  password) applies across every tenant the identity belongs to. */
   forgotPassword(email: string) { return this.request<unknown>("POST", "/forgot-password", { body: { email } }); }
   resetPassword(token: string, newPassword: string, retypePassword: string) {
     return this.request<unknown>("POST", "/reset-password", { body: { token, newPassword, retypePassword } });
   }
 
-  // Availability checks (auth token + tenant-scoped)
+  // Availability checks (auth token required). Email and mobile are checked GLOBALLY
+  // (an identity handle is unique across all tenants); username remains per-tenant.
   checkEmailAvailability(token: string, email: string) {
     return this.request<{ available: boolean }>("POST", "/check-availability/email", { token, body: { email } });
   }
@@ -253,13 +336,21 @@ export class AuthrsClient {
   }
 
   // Session (no X-Tenant-ID except logoutAll)
-  validateSession(token: string) { return this.request<{ valid: boolean }>("GET", "/session/validate", { token, tenantId: null }); }
-  me(token: string) { return this.request<AuthrsUser>("GET", "/session/me", { token, tenantId: null }); }
+  validateSession(token: string) { return this.request<AuthrsSessionInfo>("GET", "/session/validate", { token, tenantId: null }); }
+  me(token: string) { return this.request<AuthrsMe>("GET", "/session/me", { token, tenantId: null }); }
   changePassword(token: string, currentPassword: string, newPassword: string, retypePassword: string) {
     return this.request<unknown>("POST", "/session/change-password", { token, tenantId: null, body: { currentPassword, newPassword, retypePassword } });
   }
   logout(token: string) { return this.request<unknown>("POST", "/session/logout", { token, tenantId: null }); }
+  /** Revoke all sessions for the user in the current tenant. */
   logoutAll(token: string) { return this.request<unknown>("POST", "/session/logout/all", { token }); }
+  /** Switch to another tenant the same identity belongs to, without re-authenticating.
+   *  Pass an active session token; returns a new session for the target tenant. */
+  switchTenant(sessionToken: string, tenantId: string) {
+    return this.request<AuthrsSession>("POST", "/session/switch", { token: sessionToken, tenantId: null, body: { tenantId } });
+  }
+  /** Global logout: revoke every session of this identity across all of its tenants. */
+  logoutGlobal(token: string) { return this.request<unknown>("POST", "/session/logout/global", { token, tenantId: null }); }
   /** Complete a forced password change. Use the changeToken returned by login when passwordChangeRequired is true. */
   forceChangePassword(changeToken: string, newPassword: string, retypePassword: string) {
     return this.request<AuthrsSession>("POST", "/session/force-change-password", { body: { changeToken, newPassword, retypePassword } });
