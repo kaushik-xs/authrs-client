@@ -352,6 +352,13 @@ export class AuthrsClient {
   logout(token: string) { return this.request<unknown>("POST", "/session/logout", { token, tenantId: null }); }
   /** Revoke all sessions for the user in the current tenant. */
   logoutAll(token: string) { return this.request<unknown>("POST", "/session/logout/all", { token }); }
+  /** List the tenants the current session's identity belongs to (for a tenant switcher or
+   *  logging). Uses the session token — no re-authentication. */
+  sessionTenants(token: string) {
+    return this.request<{ currentTenantId: string; tenants: AuthrsTenantMembership[] }>(
+      "GET", "/session/tenants", { token, tenantId: null },
+    );
+  }
   /** Switch to another tenant the same identity belongs to, without re-authenticating.
    *  Pass an active session token; returns a new session for the target tenant. */
   switchTenant(sessionToken: string, tenantId: string) {
