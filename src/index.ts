@@ -47,6 +47,77 @@ export interface AuthrsSession {
   user?: AuthrsUser;
 }
 
+/** Successful login: a session token and its expiry. */
+export interface AuthrsLoginSuccess {
+  sessionToken: string;
+  /** Session expiry (RFC 3339). */
+  expiresAt: string;
+}
+
+/**
+ * MFA challenge: the credentials were valid but the account has MFA enabled. Exchange the
+ * `mfaToken` (with the user's TOTP code) to complete the login.
+ */
+export interface AuthrsMfaRequired {
+  mfaRequired: true;
+  mfaToken: string;
+}
+
+/**
+ * Forced password change: the credentials were valid but the account must set a new password
+ * before a session is issued. Pass the `changeToken` to `forceChangePassword`.
+ */
+export interface AuthrsPasswordChangeRequired {
+  passwordChangeRequired: true;
+  changeToken: string;
+}
+
+/**
+ * The three shapes a login-style endpoint can return. Narrow with the `isLoginSuccess` /
+ * `isMfaRequired` / `isPasswordChangeRequired` guards (or check for the discriminant fields).
+ */
+export type AuthrsLoginResult =
+  | AuthrsLoginSuccess
+  | AuthrsMfaRequired
+  | AuthrsPasswordChangeRequired;
+
+export function isLoginSuccess(r: AuthrsLoginResult): r is AuthrsLoginSuccess {
+  return "sessionToken" in r;
+}
+export function isMfaRequired(r: AuthrsLoginResult): r is AuthrsMfaRequired {
+  return "mfaRequired" in r && r.mfaRequired === true;
+}
+export function isPasswordChangeRequired(r: AuthrsLoginResult): r is AuthrsPasswordChangeRequired {
+  return "passwordChangeRequired" in r && r.passwordChangeRequired === true;
+}
+
+/** Common list query for RSQL-capable admin list endpoints. */
+export interface AuthrsListQuery {
+  /** RSQL filter expression, e.g. `status==active;email==*@acme.com`. */
+  q?: string;
+  /** Sort spec, e.g. `createdAt,desc` or `email`. */
+  sort?: string;
+  /** Page size (server clamps to a max, default page 50). */
+  limit?: number;
+  /** Row offset for pagination. */
+  offset?: number;
+}
+
+/** A tenant record, returned by the builder-only `GET /tenants` listing. */
+export interface AuthrsTenant {
+  id: string;
+  name: string;
+  status: string;
+  createdAt: string;
+}
+
+/** A registered package with its synced tables and derived actions. */
+export interface AuthrsPackageInfo {
+  packageId: string;
+  tables: string[];
+  actions: string[];
+}
+
 /** A tenant an identity belongs to, returned by the tenant-less identity login. */
 export interface AuthrsTenantMembership {
   tenantId: string;
@@ -148,11 +219,22 @@ export interface AuthrsCreatePermissionParams {
   name: string;
   description?: string;
   document: AuthrsPermissionDocument;
+  /**
+   * When true, an existing permission with the same (tenant, name) is overwritten in place
+   * (its Cedar document is replaced) instead of failing on the unique constraint. Used by
+   * RBAC sync flows so re-syncing is idempotent.
+   */
+  overwrite?: boolean;
 }
 
 export interface AuthrsPackageSyncParams {
   packageId: string;
   tables: string[];
+  /**
+   * Subset of `tables` that expose extensible-fields routes (>= 1 `extensible` JSON column).
+   * Authrs derives get/put/deleteExtensibleFields<Table> actions for these.
+   */
+  extensibleTables?: string[];
   customActions?: string[];
 }
 
@@ -201,6 +283,16 @@ export class AuthrsError extends Error {
   }
 }
 
+/** Build the `q`/`sort`/`limit`/`offset` query fragment for a list request, omitting empties. */
+function listQuery(options: AuthrsListQuery): Record<string, string | number | undefined> {
+  const query: Record<string, string | number | undefined> = {};
+  if (options.q !== undefined) query.q = options.q;
+  if (options.sort !== undefined) query.sort = options.sort;
+  if (options.limit !== undefined) query.limit = options.limit;
+  if (options.offset !== undefined) query.offset = options.offset;
+  return query;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -228,7 +320,7 @@ export class AuthrsClient {
       token?: string;
       tenantId?: string | null;
       body?: unknown;
-      query?: Record<string, string | boolean | undefined>;
+      query?: Record<string, string | number | boolean | undefined>;
     } = {},
   ): Promise<T> {
     let url = `${this.baseUrl}${path}`;
@@ -276,18 +368,42 @@ export class AuthrsClient {
    * verify-to-join email is sent to the owner and an `AuthrsVerificationPending`
    * `{ message }` is returned instead of the user. Disambiguate with `"id" in result`.
    */
-  signup(firstName: string, lastName: string, email: string, password: string, retypePassword: string) {
-    return this.request<AuthrsUser | AuthrsVerificationPending>("POST", "/signup", { body: { firstName, lastName, email, password, retypePassword } });
+  signup(
+    firstName: string,
+    lastName: string,
+    email: string,
+    password: string,
+    retypePassword: string,
+    opts: { mobile?: string; countryCode?: string } = {},
+  ) {
+    return this.request<AuthrsUser | AuthrsVerificationPending>("POST", "/signup", {
+      body: {
+        firstName,
+        lastName,
+        email,
+        password,
+        retypePassword,
+        ...(opts.mobile !== undefined ? { mobile: opts.mobile } : {}),
+        ...(opts.countryCode !== undefined ? { countryCode: opts.countryCode } : {}),
+      },
+    });
   }
   /** Accept a verify-to-join invite (token from the signup email). The tenant is encoded in the token — no X-Tenant-ID needed. */
   verifyMembership(token: string) {
     return this.request<AuthrsMembership>("POST", "/signup/verify", { tenantId: null, body: { token } });
   }
+  /**
+   * Log in with email + password within the current tenant. Returns one of three shapes:
+   * a session (`sessionToken`), an MFA challenge (`mfaRequired`), or a forced password change
+   * (`passwordChangeRequired`). Narrow with `isLoginSuccess` / `isMfaRequired` /
+   * `isPasswordChangeRequired`.
+   */
   loginEmailPassword(email: string, password: string) {
-    return this.request<AuthrsSession>("POST", "/login/email-password", { body: { email, password } });
+    return this.request<AuthrsLoginResult>("POST", "/login/email-password", { body: { email, password } });
   }
+  /** Log in with username + password. Returns an `AuthrsLoginResult` (see `loginEmailPassword`). */
   loginUsernamePassword(username: string, password: string) {
-    return this.request<AuthrsSession>("POST", "/login/username-password", { body: { username, password } });
+    return this.request<AuthrsLoginResult>("POST", "/login/username-password", { body: { username, password } });
   }
   loginEmailOtpRequest(email: string) {
     return this.request<unknown>("POST", "/login/email-otp/request", { body: { email } });
@@ -299,7 +415,7 @@ export class AuthrsClient {
     return this.request<unknown>("POST", "/login/mobile-whatsapp-otp/request", { body: { mobile, countryCode } });
   }
   loginOtpVerify(identifier: string, code: string, channel: "email" | "sms" | "whatsapp") {
-    return this.request<AuthrsSession>("POST", "/login/otp/verify", { body: { identifier, code, channel } });
+    return this.request<AuthrsLoginResult>("POST", "/login/otp/verify", { body: { identifier, code, channel } });
   }
 
   // SSO — tenant-less identity login + tenant selection (no X-Tenant-ID)
@@ -314,9 +430,12 @@ export class AuthrsClient {
   identityTenants(identityToken: string) {
     return this.request<{ tenants: AuthrsTenantMembership[] }>("GET", "/identity/tenants", { token: identityToken, tenantId: null });
   }
-  /** Exchange an identity token for a tenant-scoped session. Bearer = identity token. */
+  /**
+   * Exchange an identity token for a tenant-scoped session. Bearer = identity token. Returns an
+   * `AuthrsLoginResult` — the target tenant may still require MFA or a forced password change.
+   */
   selectTenant(identityToken: string, tenantId: string) {
-    return this.request<AuthrsSession>("POST", "/login/select-tenant", { token: identityToken, tenantId: null, body: { tenantId } });
+    return this.request<AuthrsLoginResult>("POST", "/login/select-tenant", { token: identityToken, tenantId: null, body: { tenantId } });
   }
   oauthAuthorizeUrl(provider: string): string { return `${this.baseUrl}/oauth/${encodeURIComponent(provider)}`; }
   oauthCallback(provider: string, code: string, state?: string, token?: string) {
@@ -362,13 +481,13 @@ export class AuthrsClient {
   /** Switch to another tenant the same identity belongs to, without re-authenticating.
    *  Pass an active session token; returns a new session for the target tenant. */
   switchTenant(sessionToken: string, tenantId: string) {
-    return this.request<AuthrsSession>("POST", "/session/switch", { token: sessionToken, tenantId: null, body: { tenantId } });
+    return this.request<AuthrsLoginResult>("POST", "/session/switch", { token: sessionToken, tenantId: null, body: { tenantId } });
   }
   /** Global logout: revoke every session of this identity across all of its tenants. */
   logoutGlobal(token: string) { return this.request<unknown>("POST", "/session/logout/global", { token, tenantId: null }); }
   /** Complete a forced password change. Use the changeToken returned by login when passwordChangeRequired is true. */
   forceChangePassword(changeToken: string, newPassword: string, retypePassword: string) {
-    return this.request<AuthrsSession>("POST", "/session/force-change-password", { body: { changeToken, newPassword, retypePassword } });
+    return this.request<AuthrsLoginSuccess>("POST", "/session/force-change-password", { body: { changeToken, newPassword, retypePassword } });
   }
 
   // MFA (auth token + tenant-scoped)
@@ -380,9 +499,13 @@ export class AuthrsClient {
   createUser(token: string, params: AuthrsCreateUserParams) {
     return this.request<AuthrsUser>("POST", "/admin/users", { token, body: params });
   }
-  listUsers(token: string, options: { includeArchived?: boolean } = {}) {
+  listUsers(token: string, options: AuthrsListQuery & { includeArchived?: boolean } = {}) {
     return this.request<{ users: AuthrsUser[] }>("GET", "/admin/users", {
-      token, query: options.includeArchived ? { includeArchived: "true" } : undefined,
+      token,
+      query: {
+        ...(options.includeArchived ? { includeArchived: "true" } : {}),
+        ...listQuery(options),
+      },
     });
   }
   archiveUser(token: string, userId: string) {
@@ -410,7 +533,9 @@ export class AuthrsClient {
   createRole(token: string, name: string, parentRoleId?: string | null) {
     return this.request<AuthrsRole>("POST", "/admin/roles", { token, body: { name, ...(parentRoleId != null ? { parentRoleId } : {}) } });
   }
-  listRoles(token: string) { return this.request<{ roles: AuthrsRole[] }>("GET", "/admin/roles", { token }); }
+  listRoles(token: string, options: AuthrsListQuery = {}) {
+    return this.request<{ roles: AuthrsRole[] }>("GET", "/admin/roles", { token, query: listQuery(options) });
+  }
   /** Set or clear a role's parent. Pass null to make the role a root (no parent). */
   setRoleParent(token: string, roleId: string, parentRoleId: string | null) {
     return this.request<unknown>("PUT", `/admin/roles/${encodeURIComponent(roleId)}/parent`, { token, body: { parentRoleId } });
@@ -431,7 +556,9 @@ export class AuthrsClient {
   createPermission(token: string, params: AuthrsCreatePermissionParams) {
     return this.request<AuthrsPermission>("POST", "/admin/permissions", { token, body: params });
   }
-  listPermissions(token: string) { return this.request<{ permissions: AuthrsPermission[] }>("GET", "/admin/permissions", { token }); }
+  listPermissions(token: string, options: AuthrsListQuery = {}) {
+    return this.request<{ permissions: AuthrsPermission[] }>("GET", "/admin/permissions", { token, query: listQuery(options) });
+  }
   getPermission(token: string, permissionId: string) {
     return this.request<AuthrsPermission>("GET", `/admin/permissions/${encodeURIComponent(permissionId)}`, { token });
   }
@@ -448,8 +575,8 @@ export class AuthrsClient {
   createGroup(token: string, params: AuthrsCreateGroupParams) {
     return this.request<AuthrsGroup>("POST", "/admin/groups", { token, body: params });
   }
-  listGroups(token: string) {
-    return this.request<{ groups: AuthrsGroup[] }>("GET", "/admin/groups", { token });
+  listGroups(token: string, options: AuthrsListQuery = {}) {
+    return this.request<{ groups: AuthrsGroup[] }>("GET", "/admin/groups", { token, query: listQuery(options) });
   }
   getGroup(token: string, groupId: string) {
     return this.request<AuthrsGroup>("GET", `/admin/groups/${encodeURIComponent(groupId)}`, { token });
@@ -460,8 +587,9 @@ export class AuthrsClient {
   addUserToGroup(token: string, groupId: string, userId: string) {
     return this.request<unknown>("POST", `/admin/groups/${encodeURIComponent(groupId)}/users`, { token, body: { userId } });
   }
-  listGroupMembers(token: string, groupId: string) {
-    return this.request<{ users: string[] }>("GET", `/admin/groups/${encodeURIComponent(groupId)}/users`, { token });
+  /** List the members of a group. Returns full user objects (supports RSQL `q`/`sort`/pagination). */
+  listGroupMembers(token: string, groupId: string, options: AuthrsListQuery = {}) {
+    return this.request<{ users: AuthrsUser[] }>("GET", `/admin/groups/${encodeURIComponent(groupId)}/users`, { token, query: listQuery(options) });
   }
   removeUserFromGroup(token: string, groupId: string, userId: string) {
     return this.request<unknown>("DELETE", `/admin/groups/${encodeURIComponent(groupId)}/users/${encodeURIComponent(userId)}`, { token });
@@ -483,6 +611,10 @@ export class AuthrsClient {
   syncPackage(token: string, params: AuthrsPackageSyncParams) {
     return this.request<unknown>("POST", "/admin/packages/sync", { token, body: params });
   }
+  /** List every registered package with its synced tables and derived actions. */
+  listPackageActions(token: string) {
+    return this.request<{ packages: AuthrsPackageInfo[] }>("GET", "/admin/packages/actions", { token });
+  }
 
   // Admin — KV Store
   listKvKeys(token: string) { return this.request<AuthrsKvEntry[]>("GET", "/admin/kv_store", { token }); }
@@ -494,6 +626,16 @@ export class AuthrsClient {
   }
   deleteKvValue(token: string, groupKey: string, key: string) {
     return this.request<unknown>("DELETE", `/admin/kv_store/${encodeURIComponent(groupKey)}/${encodeURIComponent(key)}`, { token });
+  }
+
+  // Platform (builder-only)
+  /**
+   * List every tenant on the server. Restricted to a session in the builder tenant holding an
+   * allowed builder role — other callers get a 403 (`AuthrsError`). Uses the session token and
+   * the client's configured tenant (which must be the builder tenant).
+   */
+  listTenants(token: string) {
+    return this.request<{ tenants: AuthrsTenant[] }>("GET", "/tenants", { token });
   }
 }
 

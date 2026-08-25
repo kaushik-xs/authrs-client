@@ -23,15 +23,17 @@ yarn add @kaushik91/authrs-client
 ## Quick Start
 
 ```ts
-import AuthrsClient from "@kaushik91/authrs-client";
+import AuthrsClient, { isLoginSuccess } from "@kaushik91/authrs-client";
 
 const client = new AuthrsClient({
   baseUrl: "https://auth.example.com",
   tenantId: "my-tenant",
 });
 
-const session = await client.loginEmailPassword("user@example.com", "password");
-console.log(session.sessionToken);
+const result = await client.loginEmailPassword("user@example.com", "password");
+if (isLoginSuccess(result)) {
+  console.log(result.sessionToken);
+}
 ```
 
 ---
@@ -117,6 +119,38 @@ interface AuthrsSession {
   user?: AuthrsUser;
 }
 
+// --- Login result (what the login-style endpoints actually return) ---
+
+interface AuthrsLoginSuccess {            // credentials OK, session issued
+  sessionToken: string;
+  expiresAt: string;                      // RFC 3339
+}
+
+interface AuthrsMfaRequired {             // credentials OK, MFA challenge
+  mfaRequired: true;
+  mfaToken: string;
+}
+
+interface AuthrsPasswordChangeRequired {  // credentials OK, must set a new password first
+  passwordChangeRequired: true;
+  changeToken: string;
+}
+
+type AuthrsLoginResult =
+  | AuthrsLoginSuccess
+  | AuthrsMfaRequired
+  | AuthrsPasswordChangeRequired;
+
+// Narrowing helpers (also exported):
+//   isLoginSuccess(r), isMfaRequired(r), isPasswordChangeRequired(r)
+
+interface AuthrsListQuery {               // shared by RSQL-capable list endpoints
+  q?: string;                             // RSQL filter, e.g. "status==active"
+  sort?: string;                          // e.g. "createdAt,desc"
+  limit?: number;                         // page size (server-clamped)
+  offset?: number;                        // pagination offset
+}
+
 // --- Single sign-on (shared identity across tenants) ---
 
 interface AuthrsTenantMembership {
@@ -161,6 +195,7 @@ interface AuthrsRole {
   id: string;
   name: string;
   uid?: string;
+  parentRoleId?: string | null;  // set when the role inherits from a parent
   tenantId?: string;
   createdAt?: string;
 }
@@ -198,12 +233,27 @@ interface AuthrsCreatePermissionParams {
   name: string;
   description?: string;
   document: AuthrsPermissionDocument;
+  overwrite?: boolean;  // replace an existing same-name permission in place (idempotent sync)
 }
 
 interface AuthrsPackageSyncParams {
   packageId: string;
   tables: string[];
+  extensibleTables?: string[];  // tables with an `extensible` JSON column → get/put/delete actions
   customActions?: string[];
+}
+
+interface AuthrsPackageInfo {    // returned by listPackageActions
+  packageId: string;
+  tables: string[];
+  actions: string[];
+}
+
+interface AuthrsTenant {         // returned by listTenants (builder-only)
+  id: string;
+  name: string;
+  status: string;
+  createdAt: string;
 }
 
 interface AuthrsKvEntry {
@@ -275,15 +325,19 @@ const spec = await client.getSpec();
 These auth methods are tenant-scoped (the configured `tenantId` is sent automatically). For
 **single sign-on across tenants** (one identity, many tenants), see [Single Sign-On](#single-sign-on-sso) below.
 
-#### `signup(firstName, lastName, email, password, retypePassword)`
+#### `signup(firstName, lastName, email, password, retypePassword, opts?)`
 
 Register a new user in the tenant. The email/mobile is a **global identity handle**: if it
 already belongs to an existing identity (e.g. the user is registered in another tenant), no
 account is created — a verify-to-join email is sent to the owner and an
 `AuthrsVerificationPending` is returned instead. Disambiguate with `"id" in result`.
 
+`opts` may include `mobile` and `countryCode` to attach a phone number to the identity.
+
 ```ts
 const result = await client.signup("Jane", "Doe", "jane@example.com", "s3cr3t!", "s3cr3t!");
+// with a phone number:
+// await client.signup("Jane", "Doe", "jane@example.com", "s3cr3t!", "s3cr3t!", { mobile: "9876543210", countryCode: "+91" });
 if ("id" in result) {
   // AuthrsUser — created
 } else {
@@ -304,19 +358,30 @@ const membership = await client.verifyMembership("token-from-email");
 
 #### `loginEmailPassword(email, password)`
 
-Log in with email and password. Returns a session token.
+Log in with email and password. Returns an **`AuthrsLoginResult`** — one of three shapes: a
+session (`sessionToken`/`expiresAt`), an MFA challenge (`mfaRequired`/`mfaToken`), or a forced
+password change (`passwordChangeRequired`/`changeToken`). Narrow with the exported
+`isLoginSuccess` / `isMfaRequired` / `isPasswordChangeRequired` guards.
 
 ```ts
-const session = await client.loginEmailPassword("jane@example.com", "s3cr3t!");
-// { sessionToken: "...", user: { ... } }
+import { isLoginSuccess, isPasswordChangeRequired } from "@kaushik91/authrs-client";
+
+const result = await client.loginEmailPassword("jane@example.com", "s3cr3t!");
+if (isLoginSuccess(result)) {
+  console.log(result.sessionToken, result.expiresAt);
+} else if (isPasswordChangeRequired(result)) {
+  const session = await client.forceChangePassword(result.changeToken, "newpass!", "newpass!");
+} else {
+  // result.mfaRequired — complete the MFA challenge with result.mfaToken
+}
 ```
 
 #### `loginUsernamePassword(username, password)`
 
-Log in with a username and password.
+Log in with a username and password. Returns an `AuthrsLoginResult` (see `loginEmailPassword`).
 
 ```ts
-const session = await client.loginUsernamePassword("jdoe", "s3cr3t!");
+const result = await client.loginUsernamePassword("jdoe", "s3cr3t!");
 ```
 
 #### `loginEmailOtpRequest(email)`
@@ -345,11 +410,11 @@ await client.loginWhatsAppOtpRequest("9876543210", "+91");
 
 #### `loginOtpVerify(identifier, code, channel)`
 
-Verify an OTP and receive a session token. `channel` is `"email"`, `"sms"`, or `"whatsapp"`.
+Verify an OTP and complete login. `channel` is `"email"`, `"sms"`, or `"whatsapp"`. Returns an
+`AuthrsLoginResult` (see `loginEmailPassword`).
 
 ```ts
-const session = await client.loginOtpVerify("jane@example.com", "123456", "email");
-// returns AuthrsSession
+const result = await client.loginOtpVerify("jane@example.com", "123456", "email");
 ```
 
 #### `oauthAuthorizeUrl(provider)`
@@ -404,11 +469,13 @@ const { identityToken, tenants } = await client.loginIdentity("jane@example.com"
 // tenants: [{ tenantId: "acme", status: "active" }, { tenantId: "globex", status: "active" }]
 
 // 2) Exchange the identity token for a session in the chosen tenant.
-const session = await client.selectTenant(identityToken, "acme");
-localStorage.setItem("token", session.sessionToken);
+//    Returns an AuthrsLoginResult — the tenant may still require MFA / a password change.
+const result = await client.selectTenant(identityToken, "acme");
+if (!isLoginSuccess(result)) throw new Error("MFA or password change required");
+localStorage.setItem("token", result.sessionToken);
 
 // later — hop to another tenant from an active session, no re-auth:
-const other = await client.switchTenant(session.sessionToken, "globex");
+const other = await client.switchTenant(result.sessionToken, "globex");
 ```
 
 #### `loginIdentity(email, password)`
@@ -425,12 +492,13 @@ const { tenants } = await client.identityTenants(identityToken);
 
 #### `selectTenant(identityToken, tenantId)`
 
-Exchanges an identity token for a tenant-scoped session. Returns an `AuthrsSession`.
+Exchanges an identity token for a tenant-scoped session. Returns an `AuthrsLoginResult` (the
+target tenant may require MFA or a forced password change).
 
 #### `switchTenant(sessionToken, tenantId)`
 
 Mints a session for another tenant the same identity belongs to, from an active session — no
-re-authentication.
+re-authentication. Returns an `AuthrsLoginResult`.
 
 #### `logoutGlobal(token)`
 
@@ -530,10 +598,13 @@ await client.logoutAll("session-token");
 Completes a forced password change. When a login response includes `passwordChangeRequired: true`, the server returns a `changeToken` instead of a full session token. Pass that token here to set a new password and receive a valid session.
 
 ```ts
+import { isPasswordChangeRequired } from "@kaushik91/authrs-client";
+
 const login = await client.loginEmailPassword("user@example.com", "temp-password");
-// login.passwordChangeRequired === true
-const session = await client.forceChangePassword(login.changeToken, "newPass!", "newPass!");
-// session.sessionToken is now a valid full session token
+if (isPasswordChangeRequired(login)) {
+  const session = await client.forceChangePassword(login.changeToken, "newPass!", "newPass!");
+  // session.sessionToken is now a valid full session token
+}
 ```
 
 ---
@@ -588,11 +659,21 @@ const user = await client.createUser("admin-token", {
 
 #### `listUsers(token, options?)`
 
-Lists all users in the tenant. Pass `{ includeArchived: true }` to include soft-deleted users.
+Lists users in the tenant. `options` accepts `includeArchived` plus the shared
+[`AuthrsListQuery`](#types) fields (`q`, `sort`, `limit`, `offset`) for RSQL filtering,
+sorting, and pagination.
 
 ```ts
 const { users } = await client.listUsers("admin-token");
 const { users: all } = await client.listUsers("admin-token", { includeArchived: true });
+
+// filter, sort, and paginate
+const page = await client.listUsers("admin-token", {
+  q: "status==active",
+  sort: "createdAt,desc",
+  limit: 20,
+  offset: 0,
+});
 ```
 
 #### `archiveUser(token, userId)`
@@ -642,12 +723,14 @@ const role = await client.createRole("admin-token", "editor");
 const subRole = await client.createRole("admin-token", "junior-editor", role.id);
 ```
 
-#### `listRoles(token)`
+#### `listRoles(token, options?)`
 
-Lists all roles in the tenant. Each role includes `parentRoleId` (null for root roles).
+Lists roles in the tenant. Each role includes `parentRoleId` (null for root roles). Accepts an
+optional [`AuthrsListQuery`](#types) (`q`, `sort`, `limit`, `offset`).
 
 ```ts
 const { roles } = await client.listRoles("admin-token");
+const { roles: named } = await client.listRoles("admin-token", { q: "name==editor*" });
 ```
 
 #### `setRoleParent(token, roleId, parentRoleId)`
@@ -735,9 +818,10 @@ const group = await client.createGroup("admin-token", {
 // returns AuthrsGroup: { id, name, uid: "engineering", description }
 ```
 
-#### `listGroups(token)`
+#### `listGroups(token, options?)`
 
-Lists all groups in the tenant.
+Lists groups in the tenant. Accepts an optional [`AuthrsListQuery`](#types) (`q`, `sort`,
+`limit`, `offset`).
 
 ```ts
 const { groups } = await client.listGroups("admin-token");
@@ -767,13 +851,14 @@ Adds a user to a group. Both must exist in the tenant. Idempotent — adding an 
 await client.addUserToGroup("admin-token", "group-id", "user-id");
 ```
 
-#### `listGroupMembers(token, groupId)`
+#### `listGroupMembers(token, groupId, options?)`
 
-Lists all user IDs that are members of a group.
+Lists the members of a group as full `AuthrsUser` objects. Accepts an optional
+[`AuthrsListQuery`](#types) (`q`, `sort`, `limit`, `offset`).
 
 ```ts
 const { users } = await client.listGroupMembers("admin-token", "group-id");
-// users: ["uuid1", "uuid2", ...]
+// users: [{ id, email, username, status, ... }, ...]
 ```
 
 #### `removeUserFromGroup(token, groupId, userId)`
@@ -825,7 +910,9 @@ Permissions are Cedar policy documents that control what actions users (via thei
 
 #### `createPermission(token, params)`
 
-Creates a new Cedar permission policy. The `document` field is validated before saving.
+Creates a new Cedar permission policy. The `document` field is validated before saving. Pass
+`overwrite: true` to replace an existing permission with the same name in place (idempotent
+re-sync) instead of failing on the unique-name constraint.
 
 Principals accept: `role:<uid>`, `role:<name>`, `user:<uuid>`, `user:<email>`, `user:<username>`, or `*`.
 
@@ -850,9 +937,10 @@ const permission = await client.createPermission("admin-token", {
 // returns AuthrsPermission
 ```
 
-#### `listPermissions(token)`
+#### `listPermissions(token, options?)`
 
-Lists all permissions in the tenant.
+Lists permissions in the tenant. Accepts an optional [`AuthrsListQuery`](#types) (`q`, `sort`,
+`limit`, `offset`).
 
 ```ts
 const { permissions } = await client.listPermissions("admin-token");
@@ -910,12 +998,41 @@ const result = await client.checkPermission(
 
 Registers or updates a package's tables and custom actions. Rebuilds the Cedar schema and evicts all policy caches. Standard CRUD actions (`getMaterials`, `postMaterials`, etc.) are auto-generated from table names. Called automatically by `architect-sdk` after a package install.
 
+List any tables that expose extensible JSON columns in `extensibleTables` (a subset of `tables`);
+authrs derives `get`/`put`/`deleteExtensibleFields<Table>` actions for them.
+
 ```ts
 await client.syncPackage("admin-token", {
   packageId: "manufacturing_core",
   tables: ["materials", "bom_headers", "bom_lines"],
+  extensibleTables: ["materials"],
   customActions: ["approveBom", "rejectBom"],
 });
+```
+
+#### `listPackageActions(token)`
+
+Lists every registered package with its synced tables and derived actions. Useful for building
+a permission editor or discovering the available Cedar actions.
+
+```ts
+const { packages } = await client.listPackageActions("admin-token");
+// packages: [{ packageId: "manufacturing_core", tables: [...], actions: [...] }, ...]
+```
+
+---
+
+### Platform (builder-only)
+
+#### `listTenants(token)`
+
+Lists every tenant on the server. **Restricted** to a session in the builder tenant that holds
+an allowed builder role — other callers receive a `403` (`AuthrsError`). The client's configured
+`tenantId` must be the builder tenant.
+
+```ts
+const { tenants } = await client.listTenants("builder-session-token");
+// tenants: [{ id, name, status, createdAt }, ...]
 ```
 
 ---
