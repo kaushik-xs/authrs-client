@@ -268,6 +268,12 @@ export interface AuthrsCreateGroupParams {
   description?: string;
 }
 
+/** Partial update. Omitted fields are unchanged; `description: null` clears it. */
+export interface AuthrsUpdateGroupParams {
+  name?: string;
+  description?: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Error
 // ---------------------------------------------------------------------------
@@ -580,6 +586,10 @@ export class AuthrsClient {
   }
   getGroup(token: string, groupId: string) {
     return this.request<AuthrsGroup>("GET", `/admin/groups/${encodeURIComponent(groupId)}`, { token });
+  }
+  /** Partially update a group. Renaming does not change the group's `uid`. */
+  updateGroup(token: string, groupId: string, params: AuthrsUpdateGroupParams) {
+    return this.request<AuthrsGroup>("PATCH", `/admin/groups/${encodeURIComponent(groupId)}`, { token, body: params });
   }
   deleteGroup(token: string, groupId: string) {
     return this.request<unknown>("DELETE", `/admin/groups/${encodeURIComponent(groupId)}`, { token });

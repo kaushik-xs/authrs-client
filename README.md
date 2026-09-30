@@ -285,6 +285,11 @@ interface AuthrsCreateGroupParams {
   name: string;
   description?: string;
 }
+
+interface AuthrsUpdateGroupParams {
+  name?: string;
+  description?: string | null; // null clears the description
+}
 ```
 
 ---
@@ -833,6 +838,17 @@ Gets a single group by ID.
 
 ```ts
 const group = await client.getGroup("admin-token", "group-id");
+```
+
+#### `updateGroup(token, groupId, params)`
+
+Partially updates a group. Omitted fields are left unchanged; pass `description: null` to clear the description. Renaming does **not** change the group's `uid`, so Cedar policies that reference the group keep working.
+
+```ts
+const group = await client.updateGroup("admin-token", "group-id", {
+  name: "Platform Engineering",
+});
+// returns AuthrsGroup: { id, name: "Platform Engineering", uid: "engineering", description }
 ```
 
 #### `deleteGroup(token, groupId)`
