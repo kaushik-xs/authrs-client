@@ -136,6 +136,19 @@ interface AuthrsPasswordChangeRequired {  // credentials OK, must set a new pass
   changeToken: string;
 }
 
+// --- OAuth / MFA ---
+
+type AuthrsOAuthProvider = "google" | "microsoft";
+
+interface AuthrsOAuthStart {       // startOAuth()
+  authorizationUrl: string;        // navigate the browser here
+  state: string;                   // keep; compare with the state the provider sends back
+}
+
+interface AuthrsMfaStatus { enabled: boolean; backupCodesRemaining: number; }
+interface AuthrsMfaEnrollment { secret: string; otpauthUrl: string; }   // enableMfa()
+interface AuthrsMfaEnabled { enabled: true; backupCodes: string[]; }    // verifyMfa()
+
 type AuthrsLoginResult =
   | AuthrsLoginSuccess
   | AuthrsMfaRequired
@@ -422,26 +435,39 @@ Verify an OTP and complete login. `channel` is `"email"`, `"sms"`, or `"whatsapp
 const result = await client.loginOtpVerify("jane@example.com", "123456", "email");
 ```
 
-#### `oauthAuthorizeUrl(provider)`
+#### `startOAuth(provider)`
 
-Returns the OAuth authorization URL for the given provider (e.g. `"google"`, `"github"`). Redirect the user to this URL to start the OAuth flow.
-
-```ts
-const url = client.oauthAuthorizeUrl("google");
-// "https://auth.example.com/oauth/google"
-window.location.href = url;
-```
-
-> This is a synchronous method — it does not make a network request.
-
-#### `oauthCallback(provider, code, state?, token?)`
-
-Completes the OAuth flow by exchanging the authorization code returned by the provider. Call this from your OAuth callback route.
+Starts a Google or Microsoft sign-in for the current tenant. Returns `{ authorizationUrl, state }`.
+Keep `state`, then send the browser to `authorizationUrl`. The provider redirects back to the
+tenant's configured `redirectUrl` (a page in your app) with `?code=…&state=…`.
 
 ```ts
-const session = await client.oauthCallback("google", req.query.code, req.query.state);
-// returns AuthrsSession
+const { authorizationUrl, state } = await client.startOAuth("microsoft");
+sessionStorage.setItem("oauth_state", state);
+window.location.href = authorizationUrl;
 ```
+
+Provider credentials are configured per tenant in the Authrs kv_store (group `oauth`, key
+`google` / `microsoft`): `{ clientId, clientSecret, redirectUrl, tenant?, allowSignup? }`.
+For Microsoft, `tenant` is `common` (default), `organizations`, `consumers`, or an Entra tenant ID.
+
+#### `oauthCallback(provider, code, state)`
+
+Completes the sign-in from your `redirectUrl` page. The tenant comes from `state`, so no
+`X-Tenant-ID` is sent. Returns an `AuthrsLoginResult`, so the account may still require MFA.
+
+```ts
+const params = new URLSearchParams(window.location.search);
+if (params.get("state") !== sessionStorage.getItem("oauth_state")) throw new Error("State mismatch");
+const result = await client.oauthCallback("microsoft", params.get("code")!, params.get("state")!);
+if (isMfaRequired(result)) {
+  // prompt for the authenticator code, then client.validateMfa(result.mfaToken, code)
+}
+```
+
+The first sign-in links the provider account to the existing identity with the same email
+when the provider has **verified** that email. Otherwise it creates a new password-less
+identity, unless the tenant sets `allowSignup: false`.
 
 #### `forgotPassword(email)`
 
@@ -607,8 +633,8 @@ import { isPasswordChangeRequired } from "@kaushik91/authrs-client";
 
 const login = await client.loginEmailPassword("user@example.com", "temp-password");
 if (isPasswordChangeRequired(login)) {
-  const session = await client.forceChangePassword(login.changeToken, "newPass!", "newPass!");
-  // session.sessionToken is now a valid full session token
+  const result = await client.forceChangePassword(login.changeToken, "newPass!", "newPass!");
+  // a session, or { mfaRequired, mfaToken } if the account has MFA enabled
 }
 ```
 
@@ -616,30 +642,51 @@ if (isPasswordChangeRequired(login)) {
 
 ### MFA (Multi-Factor Authentication)
 
-MFA methods require a session token and are tenant-scoped.
+Authenticator-app TOTP (Google/Microsoft Authenticator, Authy, 1Password, …) with single-use
+backup codes. MFA belongs to the **global identity**, so it applies in every tenant and to every
+login method (password, OTP, OAuth, SSO). These methods send no `X-Tenant-ID`.
+
+#### `mfaStatus(token)`
+
+```ts
+const { enabled, backupCodesRemaining } = await client.mfaStatus(sessionToken);
+```
 
 #### `enableMfa(token)`
 
-Initiates MFA setup for the authenticated user (e.g. returns a TOTP QR code URI).
+Starts enrollment. Render `otpauthUrl` as a QR code (e.g. with the `qrcode` package) and show
+`secret` for manual entry. MFA is not active until `verifyMfa` succeeds.
 
 ```ts
-const result = await client.enableMfa("session-token");
+const { secret, otpauthUrl } = await client.enableMfa(sessionToken);
 ```
 
 #### `verifyMfa(token, code)`
 
-Confirms and activates MFA using the setup code.
+Confirms enrollment with the first code from the app and turns MFA on. Returns 10 backup codes.
+**Show them once**: they cannot be retrieved later.
 
 ```ts
-await client.verifyMfa("session-token", "123456");
+const { backupCodes } = await client.verifyMfa(sessionToken, "123456");
 ```
 
-#### `validateMfa(token, code)`
+#### `validateMfa(mfaToken, code)`
 
-Validates an MFA code during login (second factor step).
+Completes a login that returned `{ mfaRequired: true, mfaToken }`. `code` is the current
+6-digit TOTP code or a backup code. The `mfaToken` lasts 5 minutes or 5 attempts, and wrong
+codes count toward the account lockout.
 
 ```ts
-await client.validateMfa("session-token", "123456");
+const { sessionToken, expiresAt } = await client.validateMfa(result.mfaToken, "123456");
+```
+
+#### `disableMfa(token, code)` / `regenerateBackupCodes(token, code)`
+
+Both require a current TOTP or backup code.
+
+```ts
+await client.disableMfa(sessionToken, "123456");
+const { backupCodes } = await client.regenerateBackupCodes(sessionToken, "123456");
 ```
 
 ---
@@ -1148,11 +1195,22 @@ const session = await client.loginOtpVerify("user@example.com", userEnteredCode,
 ### MFA login flow
 
 ```ts
-// Initial login returns a partial/pre-MFA session token
-const session = await client.loginEmailPassword(email, password);
+const result = await client.loginEmailPassword(email, password);   // or OTP / OAuth / selectTenant
 
-// Validate MFA to fully authenticate
-await client.validateMfa(session.sessionToken, totpCode);
+if (isMfaRequired(result)) {
+  // Ask for the authenticator code (or a backup code)
+  const session = await client.validateMfa(result.mfaToken, totpCode);
+  // session.sessionToken is a full session
+}
+```
+
+### Authenticator enrollment flow
+
+```ts
+const { otpauthUrl, secret } = await client.enableMfa(sessionToken);
+// show QR(otpauthUrl) + secret; user scans and types the first code
+const { backupCodes } = await client.verifyMfa(sessionToken, firstCode);
+// show backupCodes once
 ```
 
 ### Forced password change flow

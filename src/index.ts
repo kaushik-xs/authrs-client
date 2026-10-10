@@ -91,6 +91,41 @@ export function isPasswordChangeRequired(r: AuthrsLoginResult): r is AuthrsPassw
   return "passwordChangeRequired" in r && r.passwordChangeRequired === true;
 }
 
+/** OAuth / OpenID Connect providers supported by Authrs. */
+export type AuthrsOAuthProvider = "google" | "microsoft";
+
+/**
+ * Returned by `startOAuth`: navigate the browser to `authorizationUrl` and keep `state`
+ * (e.g. in sessionStorage) to compare against the `state` the provider sends back.
+ */
+export interface AuthrsOAuthStart {
+  authorizationUrl: string;
+  state: string;
+}
+
+/** Whether MFA is on for the session's identity (MFA is global across tenants). */
+export interface AuthrsMfaStatus {
+  enabled: boolean;
+  backupCodesRemaining: number;
+}
+
+/**
+ * Returned by `enableMfa`: add the account to an authenticator app by rendering
+ * `otpauthUrl` as a QR code, or by typing `secret` manually.
+ */
+export interface AuthrsMfaEnrollment {
+  /** Base32 TOTP secret for manual entry. */
+  secret: string;
+  /** `otpauth://totp/...` URI — render as a QR code. */
+  otpauthUrl: string;
+}
+
+/** Returned by `verifyMfa`: MFA is now on. Show the backup codes once — they are not retrievable later. */
+export interface AuthrsMfaEnabled {
+  enabled: true;
+  backupCodes: string[];
+}
+
 /** Common list query for RSQL-capable admin list endpoints. */
 export interface AuthrsListQuery {
   /** RSQL filter expression, e.g. `status==active;email==*@acme.com`. */
@@ -443,10 +478,24 @@ export class AuthrsClient {
   selectTenant(identityToken: string, tenantId: string) {
     return this.request<AuthrsLoginResult>("POST", "/login/select-tenant", { token: identityToken, tenantId: null, body: { tenantId } });
   }
-  oauthAuthorizeUrl(provider: string): string { return `${this.baseUrl}/oauth/${encodeURIComponent(provider)}`; }
-  oauthCallback(provider: string, code: string, state?: string, token?: string) {
-    return this.request<AuthrsSession>("GET", `/oauth/${encodeURIComponent(provider)}/callback`, {
-      token, query: { code, ...(state !== undefined ? { state } : {}) },
+  // OAuth / OpenID Connect (Google, Microsoft)
+  /**
+   * Start an OAuth sign-in for the current tenant. Returns the provider authorization URL to
+   * navigate to, plus a `state` to keep and compare when the provider redirects back to the
+   * tenant's configured `redirectUrl` (a page in your app).
+   */
+  startOAuth(provider: AuthrsOAuthProvider) {
+    return this.request<AuthrsOAuthStart>("GET", `/oauth/${encodeURIComponent(provider)}`);
+  }
+  /**
+   * Complete an OAuth sign-in from your `redirectUrl` page with the `code` and `state` the
+   * provider appended. The tenant is taken from `state`, so no X-Tenant-ID is sent. Returns an
+   * `AuthrsLoginResult` — the account may still require MFA.
+   */
+  oauthCallback(provider: AuthrsOAuthProvider, code: string, state: string) {
+    return this.request<AuthrsLoginResult>("GET", `/oauth/${encodeURIComponent(provider)}/callback`, {
+      tenantId: null,
+      query: { code, state },
     });
   }
   /** Start a password reset. Operates on the GLOBAL identity — the reset (and the resulting
@@ -491,15 +540,40 @@ export class AuthrsClient {
   }
   /** Global logout: revoke every session of this identity across all of its tenants. */
   logoutGlobal(token: string) { return this.request<unknown>("POST", "/session/logout/global", { token, tenantId: null }); }
-  /** Complete a forced password change. Use the changeToken returned by login when passwordChangeRequired is true. */
+  /**
+   * Complete a forced password change. Use the changeToken returned by login when
+   * passwordChangeRequired is true. Returns a session, or an MFA challenge when the account
+   * has MFA enabled (complete it with `validateMfa`).
+   */
   forceChangePassword(changeToken: string, newPassword: string, retypePassword: string) {
-    return this.request<AuthrsLoginSuccess>("POST", "/session/force-change-password", { body: { changeToken, newPassword, retypePassword } });
+    return this.request<AuthrsLoginSuccess | AuthrsMfaRequired>("POST", "/session/force-change-password", { body: { changeToken, newPassword, retypePassword } });
   }
 
-  // MFA (auth token + tenant-scoped)
-  enableMfa(token: string) { return this.request<unknown>("POST", "/mfa/enable", { token }); }
-  verifyMfa(token: string, code: string) { return this.request<unknown>("POST", "/mfa/verify", { token, body: { code } }); }
-  validateMfa(token: string, code: string) { return this.request<unknown>("POST", "/mfa/validate", { token, body: { code } }); }
+  // MFA — authenticator app (TOTP) + backup codes. MFA belongs to the global identity, so it
+  // applies in every tenant; no X-Tenant-ID is sent.
+  /** Whether MFA is on for the session's identity, and how many backup codes remain. */
+  mfaStatus(token: string) { return this.request<AuthrsMfaStatus>("GET", "/mfa/status", { token, tenantId: null }); }
+  /** Start authenticator enrollment (session token). MFA is not active until `verifyMfa` succeeds. */
+  enableMfa(token: string) { return this.request<AuthrsMfaEnrollment>("POST", "/mfa/enable", { token, tenantId: null }); }
+  /** Confirm enrollment with the first 6-digit code from the app. Returns one-time backup codes. */
+  verifyMfa(token: string, code: string) {
+    return this.request<AuthrsMfaEnabled>("POST", "/mfa/verify", { token, tenantId: null, body: { code } });
+  }
+  /**
+   * Complete a login that returned `{ mfaRequired, mfaToken }`. `code` is a 6-digit TOTP code
+   * or a backup code. The mfaToken is valid for 5 minutes / 5 attempts.
+   */
+  validateMfa(mfaToken: string, code: string) {
+    return this.request<AuthrsLoginSuccess>("POST", "/mfa/validate", { tenantId: null, body: { mfaToken, code } });
+  }
+  /** Turn MFA off (session token + a current TOTP or backup code). */
+  disableMfa(token: string, code: string) {
+    return this.request<{ enabled: false }>("POST", "/mfa/disable", { token, tenantId: null, body: { code } });
+  }
+  /** Replace all backup codes (session token + a current TOTP or backup code). */
+  regenerateBackupCodes(token: string, code: string) {
+    return this.request<{ backupCodes: string[] }>("POST", "/mfa/backup-codes", { token, tenantId: null, body: { code } });
+  }
 
   // Admin — Users
   createUser(token: string, params: AuthrsCreateUserParams) {
