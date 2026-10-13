@@ -153,6 +153,15 @@ export interface AuthrsPackageInfo {
   actions: string[];
 }
 
+/**
+ * An action authrs declares for every tenant without any package sync, scoped to one resource
+ * type — e.g. `{ action: "run", resourceType: "query" }` for architect-sdk saved queries.
+ */
+export interface AuthrsBuiltinAction {
+  action: string;
+  resourceType: string;
+}
+
 /** A tenant an identity belongs to, returned by the tenant-less identity login. */
 export interface AuthrsTenantMembership {
   tenantId: string;
@@ -222,10 +231,15 @@ export interface AuthrsRoleAncestor {
 }
 
 export interface AuthrsPermissionStatement {
-  sid?: string;
-  effect: "Allow" | "Deny";
+  sid: string;
+  effect: "allow" | "deny";
   principals: string[];
   actions: string[];
+  /**
+   * Resource paths, e.g. `service:core/package:pkg/table:tbl` or `service:core/package:pkg/query:q`.
+   * A `*` matches any characters (including `/`): `service:core/package:pkg/query:*` covers every
+   * query in the package, `service:core/*` everything in the service, `*` any resource.
+   */
   resources: string[];
   conditions?: unknown[];
 }
@@ -695,9 +709,16 @@ export class AuthrsClient {
   syncPackage(token: string, params: AuthrsPackageSyncParams) {
     return this.request<unknown>("POST", "/admin/packages/sync", { token, body: params });
   }
-  /** List every registered package with its synced tables and derived actions. */
+  /**
+   * List every registered package with its synced tables and derived actions, plus the built-in
+   * actions declared for every tenant (absent on servers that predate built-in actions).
+   */
   listPackageActions(token: string) {
-    return this.request<{ packages: AuthrsPackageInfo[] }>("GET", "/admin/packages/actions", { token });
+    return this.request<{ packages: AuthrsPackageInfo[]; builtinActions?: AuthrsBuiltinAction[] }>(
+      "GET",
+      "/admin/packages/actions",
+      { token },
+    );
   }
 
   // Admin — KV Store

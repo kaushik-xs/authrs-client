@@ -214,11 +214,11 @@ interface AuthrsRole {
 }
 
 interface AuthrsPermissionStatement {
-  sid?: string;
-  effect: "Allow" | "Deny";
+  sid: string;
+  effect: "allow" | "deny";      // lowercase — authrs rejects "Allow"/"Deny"
   principals: string[];
   actions: string[];
-  resources: string[];
+  resources: string[];            // exact paths, or patterns with `*` (e.g. ".../query:*")
   conditions?: unknown[];
 }
 
@@ -260,6 +260,11 @@ interface AuthrsPackageInfo {    // returned by listPackageActions
   packageId: string;
   tables: string[];
   actions: string[];
+}
+
+interface AuthrsBuiltinAction {  // returned by listPackageActions (builtinActions)
+  action: string;                // e.g. "run"
+  resourceType: string;          // e.g. "query"
 }
 
 interface AuthrsTenant {         // returned by listTenants (builder-only)
@@ -988,7 +993,7 @@ const permission = await client.createPermission("admin-token", {
     statements: [
       {
         sid: "AllowEditorReadMaterials",
-        effect: "Allow",
+        effect: "allow",
         principals: ["role:editor"],
         actions: ["getMaterials"],
         resources: ["service:core/package:manufacturing_core/table:materials"],
@@ -998,6 +1003,42 @@ const permission = await client.createPermission("admin-token", {
   },
 });
 // returns AuthrsPermission
+```
+
+`effect` must be lowercase (`"allow"` / `"deny"`), and every statement needs a `sid`.
+
+**Wildcard resources.** A resource containing `*` is a pattern matched against the full resource
+path; `*` matches any characters, including `/`. The action must still match exactly.
+
+| Resource | Covers |
+|---|---|
+| `service:core/package:pkg/query:sample` | only that query |
+| `service:core/package:pkg/query:*` | every query in `pkg` |
+| `service:core/package:pkg/*` | everything in `pkg` (tables, columns, queries) |
+| `service:core/*` | everything in the service |
+| `*` | any resource |
+
+Deny statements win over allow, so a wildcard allow can be narrowed with an exact deny (and vice
+versa).
+
+```ts
+// Let a role run every saved query in architect-sdk's standalone (_default) query set.
+await client.createPermission("admin-token", {
+  name: "run-all-queries",
+  document: {
+    version: "1.0",
+    statements: [
+      {
+        sid: "RunAllQueries",
+        effect: "allow",
+        principals: ["*"],
+        actions: ["run"],
+        resources: ["service:core/package:_default/query:*"],
+        conditions: [],
+      },
+    ],
+  },
+});
 ```
 
 #### `listPermissions(token, options?)`
@@ -1032,7 +1073,7 @@ Evaluates Cedar policy for a user against a resource.
 - Pass `action` to check a **single action** → returns `{ resource, action, allowed: boolean }`.
 - Omit `action` to check **all actions** for the resource scope → returns `{ resource, decisions: { actionName: boolean, ... } }`.
 
-Resource scopes: `service:core/package:pkg/table:tbl` (table), `service:core/package:pkg` (package), `service:core` (service).
+Resource scopes: `service:core/package:pkg/table:tbl` (table), `service:core/package:pkg/query:q` (saved query — only `run`), `service:core/package:pkg` (package), `service:core` (service).
 
 ```ts
 // Single action
@@ -1081,7 +1122,12 @@ a permission editor or discovering the available Cedar actions.
 ```ts
 const { packages } = await client.listPackageActions("admin-token");
 // packages: [{ packageId: "manufacturing_core", tables: [...], actions: [...] }, ...]
+// builtinActions: [{ action: "run", resourceType: "query" }]
 ```
+
+`builtinActions` are declared for every tenant without any sync — today just `run`, which
+applies only to saved-query resources (`service:<svc>/package:<pkg>/query:<id>`). Don't pass them
+as `customActions`. Older servers omit the field.
 
 ---
 
