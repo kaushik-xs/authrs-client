@@ -1014,7 +1014,9 @@ path; `*` matches any characters, including `/`. The action must still match exa
 |---|---|
 | `service:core/package:pkg/query:sample` | only that query |
 | `service:core/package:pkg/query:*` | every query in `pkg` |
-| `service:core/package:pkg/*` | everything in `pkg` (tables, columns, queries) |
+| `service:core/package:pkg/view:sample` | only that view |
+| `service:core/package:pkg/view:*` | every view in `pkg` |
+| `service:core/package:pkg/*` | everything in `pkg` (tables, columns, queries, views) |
 | `service:core/*` | everything in the service |
 | `*` | any resource |
 
@@ -1073,7 +1075,7 @@ Evaluates Cedar policy for a user against a resource.
 - Pass `action` to check a **single action** → returns `{ resource, action, allowed: boolean }`.
 - Omit `action` to check **all actions** for the resource scope → returns `{ resource, decisions: { actionName: boolean, ... } }`.
 
-Resource scopes: `service:core/package:pkg/table:tbl` (table), `service:core/package:pkg/query:q` (saved query — only `run`), `service:core/package:pkg` (package), `service:core` (service).
+Resource scopes: `service:core/package:pkg/table:tbl` (table), `service:core/package:pkg/query:q` (saved query — only `run`), `service:core/package:pkg/view:v` (package view, by view id — only `get` and `refresh`), `service:core/package:pkg` (package), `service:core` (service).
 
 ```ts
 // Single action
@@ -1122,12 +1124,22 @@ a permission editor or discovering the available Cedar actions.
 ```ts
 const { packages } = await client.listPackageActions("admin-token");
 // packages: [{ packageId: "manufacturing_core", tables: [...], actions: [...] }, ...]
-// builtinActions: [{ action: "run", resourceType: "query" }]
+// builtinActions: [
+//   { action: "run", resourceType: "query" },
+//   { action: "get", resourceType: "view" },
+//   { action: "refresh", resourceType: "view" },
+// ]
 ```
 
-`builtinActions` are declared for every tenant without any sync — today just `run`, which
-applies only to saved-query resources (`service:<svc>/package:<pkg>/query:<id>`). Don't pass them
-as `customActions`. Older servers omit the field.
+`builtinActions` are declared for every tenant without any sync, each scoped to one resource type:
+
+- `run` applies only to saved-query resources (`service:<svc>/package:<pkg>/query:<id>`).
+- `get` and `refresh` apply only to view resources (`service:<svc>/package:<pkg>/view:<id>`).
+  architect-sdk checks `get` for reading a view-backed API entity and its materialized-refresh
+  status, and `refresh` for refreshing a materialized view. Views are never registered via package
+  sync — grant these actions on the view resource directly.
+
+Don't pass them as `customActions`. Older servers omit the field, or list only `run`.
 
 ---
 

@@ -155,7 +155,9 @@ export interface AuthrsPackageInfo {
 
 /**
  * An action authrs declares for every tenant without any package sync, scoped to one resource
- * type — e.g. `{ action: "run", resourceType: "query" }` for architect-sdk saved queries.
+ * type — e.g. `{ action: "run", resourceType: "query" }` for architect-sdk saved queries, or
+ * `{ action: "get", resourceType: "view" }` / `{ action: "refresh", resourceType: "view" }` for
+ * architect-sdk package views.
  */
 export interface AuthrsBuiltinAction {
   action: string;
@@ -236,7 +238,8 @@ export interface AuthrsPermissionStatement {
   principals: string[];
   actions: string[];
   /**
-   * Resource paths, e.g. `service:core/package:pkg/table:tbl` or `service:core/package:pkg/query:q`.
+   * Resource paths, e.g. `service:core/package:pkg/table:tbl`, `service:core/package:pkg/query:q`
+   * or `service:core/package:pkg/view:v`.
    * A `*` matches any characters (including `/`): `service:core/package:pkg/query:*` covers every
    * query in the package, `service:core/*` everything in the service, `*` any resource.
    */
