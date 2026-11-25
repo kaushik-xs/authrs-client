@@ -11,9 +11,12 @@ Both SDKs expose the same methods and are always released together with the same
 
 ## Releasing
 
-Versions live in `typescript/package.json` and `rust/Cargo.toml` and must match (CI enforces this). Releases are cut by the **Release** workflow, which publishes both packages and tags the commit `vX.Y.Z`:
+Push a version tag — that's the whole release:
 
-- **Actions → Release → Run workflow**, choosing `patch` / `minor` / `major`: bumps both manifests, commits, tags `vX.Y.Z`, creates the GitHub release, then publishes to npm and crates.io.
-- **Pushing a tag** `vX.Y.Z` (`git tag v1.2.3 && git push origin v1.2.3`): publishes the tagged commit and creates its GitHub release. Bump both manifests to `X.Y.Z` first — the workflow fails if either differs from the tag.
+```sh
+git tag v1.2.3 && git push origin v1.2.3
+```
+
+The **Release** workflow runs the CI checks, takes the version from the tag, stamps it into `typescript/package.json` and `rust/Cargo.toml`, publishes to npm and crates.io, and creates the GitHub release. The versions committed in the manifests are not used for releases, so there is nothing to bump beforehand.
 
 Required repository secrets: `NPM_TOKEN` and `CARGO_REGISTRY_TOKEN`.

@@ -1,30 +1,15 @@
 name: Release
 
-# Publishes the TypeScript SDK to npm and the Rust SDK to crates.io under ONE version, tagged
-# `vX.Y.Z` on the commit that was published.
+# Push a tag `vX.Y.Z` to release. The version is taken from the tag and stamped into
+# typescript/package.json and rust/Cargo.toml at publish time, so the TypeScript SDK (npm) and
+# the Rust SDK (crates.io) always ship as exactly `X.Y.Z`. A GitHub release is created for the tag.
 #
-# - workflow_dispatch: bumps typescript/package.json + rust/Cargo.toml together, commits,
-#   tags vX.Y.Z, creates the GitHub release, then publishes both.
-# - push a tag vX.Y.Z: publishes the tagged commit (fails unless both manifests equal the tag),
-#   and creates the GitHub release for it if there isn't one yet.
-#
-# The tag pushed by workflow_dispatch uses GITHUB_TOKEN, which does not re-trigger this workflow.
+#   git tag v1.2.3 && git push origin v1.2.3
 
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      version_bump:
-        description: "Version bump type"
-        required: true
-        default: patch
-        type: choice
-        options:
-          - patch
-          - minor
-          - major
 
 concurrency:
   group: release
@@ -38,77 +23,22 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   version:
-    name: Version & tag
+    name: Resolve version
     needs: checks
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
-      version: ${{ steps.verify.outputs.version }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Bump both SDKs, commit and tag (workflow_dispatch only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Version from tag
+        id: resolve
         env:
-          BUMP: ${{ inputs.version_bump }}
-          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          VERSION=$(cd typescript && npm version "$BUMP" --no-git-tag-version | sed 's/^v//')
-          # First `version = ` line only — that's [package]; dependency versions are inline tables.
-          VERSION="$VERSION" perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' rust/Cargo.toml
-          (cd rust && cargo update --workspace)
-
-          git add typescript/package.json typescript/package-lock.json rust/Cargo.toml rust/Cargo.lock
-          git commit -m "chore: bump version to ${VERSION} [skip ci]"
-          git tag "v${VERSION}"
-          git push origin HEAD "v${VERSION}"
-          gh release create "v${VERSION}" --verify-tag --generate-notes --title "v${VERSION}"
-
-          echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
-
-      - name: Use pushed tag (tag push only)
-        if: github.event_name == 'push'
-        env:
-          PUSHED_TAG: ${{ github.ref_name }}
-        run: echo "TAG=${PUSHED_TAG}" >> "$GITHUB_ENV"
-
-      - name: Verify tag matches both SDK versions
-        id: verify
-        run: |
-          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
-            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z (optionally vX.Y.Z-pre)"
             exit 1
           fi
-          VERSION="${TAG#v}"
-          TS=$(jq -r .version typescript/package.json)
-          RS=$(cargo metadata --no-deps --format-version 1 --manifest-path rust/Cargo.toml | jq -r '.packages[0].version')
-          echo "tag=$VERSION typescript=$TS rust=$RS"
-          if [ "$TS" != "$VERSION" ] || [ "$RS" != "$VERSION" ]; then
-            echo "::error::Tag $TAG does not match SDK versions (typescript $TS, rust $RS)"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub release (tag push only)
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists — skipping"
-          else
-            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
-          fi
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
   publish-npm:
     name: Publish to npm
@@ -121,8 +51,6 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: v${{ needs.version.outputs.version }}
 
       - uses: actions/setup-node@v4
         with:
@@ -131,6 +59,10 @@ jobs:
           scope: "@kaushik91"
 
       - run: npm ci
+
+      - name: Set version from tag
+        run: npm version "$VERSION" --no-git-tag-version --allow-same-version
+
       - run: npm run build
       - run: npm run typecheck
 
@@ -155,10 +87,14 @@ jobs:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: v${{ needs.version.outputs.version }}
 
       - uses: dtolnay/rust-toolchain@stable
+
+      - name: Set version from tag
+        run: |
+          # First `version = ` line only — that's [package]; dependency versions are inline tables.
+          perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' Cargo.toml
+          cargo update --workspace
 
       - name: Publish
         run: |
@@ -166,7 +102,27 @@ jobs:
               "https://crates.io/api/v1/crates/authrs-client/${VERSION}" >/dev/null; then
             echo "authrs-client ${VERSION} is already on crates.io — skipping"
           else
-            cargo publish --locked
+            # --allow-dirty: Cargo.toml/Cargo.lock were just stamped with the tag version.
+            cargo publish --locked --allow-dirty
           fi
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  github-release:
+    name: GitHub release
+    needs: [version, publish-npm, publish-crate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping"
+          else
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          fi

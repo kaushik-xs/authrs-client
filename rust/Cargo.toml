@@ -1,6 +1,6 @@
 [package]
 name = "authrs-client"
-# Kept in lockstep with typescript/package.json — the release workflow bumps both.
+# Placeholder — the release workflow sets this (and typescript/package.json) from the git tag.
 version = "0.0.19"
 edition = "2024"
 description = "Typed async Rust client for the Authrs multi-tenant authentication service"
