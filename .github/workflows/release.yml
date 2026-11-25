@@ -5,11 +5,15 @@ name: Release
 #
 # - workflow_dispatch: bumps typescript/package.json + rust/Cargo.toml together, commits,
 #   tags vX.Y.Z, creates the GitHub release, then publishes both.
-# - release published: publishes the tagged commit; fails unless both manifests equal the tag.
+# - push a tag vX.Y.Z: publishes the tagged commit (fails unless both manifests equal the tag),
+#   and creates the GitHub release for it if there isn't one yet.
+#
+# The tag pushed by workflow_dispatch uses GITHUB_TOKEN, which does not re-trigger this workflow.
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       version_bump:
@@ -72,11 +76,11 @@ jobs:
 
           echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
 
-      - name: Use release tag (release event only)
-        if: github.event_name == 'release'
+      - name: Use pushed tag (tag push only)
+        if: github.event_name == 'push'
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
-        run: echo "TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          PUSHED_TAG: ${{ github.ref_name }}
+        run: echo "TAG=${PUSHED_TAG}" >> "$GITHUB_ENV"
 
       - name: Verify tag matches both SDK versions
         id: verify
@@ -94,6 +98,17 @@ jobs:
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release (tag push only)
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — skipping"
+          else
+            gh release create "$TAG" --verify-tag --generate-notes --title "$TAG"
+          fi
 
   publish-npm:
     name: Publish to npm
