@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Versions in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare typescript/package.json and rust/Cargo.toml
+        run: |
+          TS=$(jq -r .version typescript/package.json)
+          RS=$(sed -nE 's/^version = "(.*)"/\1/p' rust/Cargo.toml | head -1)
+          echo "typescript=$TS rust=$RS"
+          if [ "$TS" != "$RS" ]; then
+            echo "::error::SDK versions differ (typescript $TS, rust $RS) — they must be released in lockstep"
+            exit 1
+          fi
+
+  typescript:
+    name: TypeScript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Check native-tls feature
+        run: cargo check --locked --no-default-features --features native-tls
+      - name: Package dry run
+        run: cargo publish --locked --dry-run

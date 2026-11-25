@@ -1,0 +1,157 @@
+name: Release
+
+# Publishes the TypeScript SDK to npm and the Rust SDK to crates.io under ONE version, tagged
+# `vX.Y.Z` on the commit that was published.
+#
+# - workflow_dispatch: bumps typescript/package.json + rust/Cargo.toml together, commits,
+#   tags vX.Y.Z, creates the GitHub release, then publishes both.
+# - release published: publishes the tagged commit; fails unless both manifests equal the tag.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: "Version bump type"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/ci.yml
+
+  version:
+    name: Version & tag
+    needs: checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Bump both SDKs, commit and tag (workflow_dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          BUMP: ${{ inputs.version_bump }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          VERSION=$(cd typescript && npm version "$BUMP" --no-git-tag-version | sed 's/^v//')
+          # First `version = ` line only — that's [package]; dependency versions are inline tables.
+          VERSION="$VERSION" perl -0pi -e 's/^version = "[^"]*"/version = "$ENV{VERSION}"/m' rust/Cargo.toml
+          (cd rust && cargo update --workspace)
+
+          git add typescript/package.json typescript/package-lock.json rust/Cargo.toml rust/Cargo.lock
+          git commit -m "chore: bump version to ${VERSION} [skip ci]"
+          git tag "v${VERSION}"
+          git push origin HEAD "v${VERSION}"
+          gh release create "v${VERSION}" --verify-tag --generate-notes --title "v${VERSION}"
+
+          echo "TAG=v${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Use release tag (release event only)
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: echo "TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Verify tag matches both SDK versions
+        id: verify
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          TS=$(jq -r .version typescript/package.json)
+          RS=$(cargo metadata --no-deps --format-version 1 --manifest-path rust/Cargo.toml | jq -r '.packages[0].version')
+          echo "tag=$VERSION typescript=$TS rust=$RS"
+          if [ "$TS" != "$VERSION" ] || [ "$RS" != "$VERSION" ]; then
+            echo "::error::Tag $TAG does not match SDK versions (typescript $TS, rust $RS)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  publish-npm:
+    name: Publish to npm
+    needs: version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: typescript
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          scope: "@kaushik91"
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm run typecheck
+
+      - name: Publish
+        run: |
+          if npm view "@kaushik91/authrs-client@${VERSION}" version >/dev/null 2>&1; then
+            echo "@kaushik91/authrs-client@${VERSION} is already on npm — skipping"
+          else
+            npm publish
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: version
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.version.outputs.version }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish
+        run: |
+          if curl -sf -A "authrs-client-release (https://github.com/kaushik-xs/authrs-client)" \
+              "https://crates.io/api/v1/crates/authrs-client/${VERSION}" >/dev/null; then
+            echo "authrs-client ${VERSION} is already on crates.io — skipping"
+          else
+            cargo publish --locked
+          fi
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
